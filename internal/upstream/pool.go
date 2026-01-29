@@ -33,6 +33,7 @@ func NewPool(groupCfg config.GroupConfig, globalCfg *config.Config, logger zerol
 		globalCfg.GetBlockTimeoutDuration(),
 		globalCfg.GetHealthCheckIntervalDuration(),
 		globalCfg.GetStatusLogIntervalDuration(),
+		globalCfg.GetStatsLogIntervalDuration(),
 		poolLogger,
 	)
 

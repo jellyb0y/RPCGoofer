@@ -31,6 +31,7 @@ RPCGofer is a high-performance JSON-RPC proxy designed for Ethereum-compatible b
    - Block-Based Health Checks
    - WebSocket vs Polling Monitoring
    - Lag Threshold Configuration
+   - Request Statistics Logging
 
 6. [Caching System](./caching.md)
    - Cacheable Methods

@@ -14,6 +14,7 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
   "requestTimeout": 5000,
   "healthCheckInterval": 10000,
   "statusLogInterval": 5000,
+  "statsLogInterval": 60000,
   "blockLagThreshold": 0,
   "blockTimeout": 30000,
   "dedupCacheSize": 10000,
@@ -60,6 +61,7 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
 |-----------|------|---------|-------------|
 | `healthCheckInterval` | int | `10000` | Health check interval in milliseconds (for HTTP polling) |
 | `statusLogInterval` | int | `5000` | Status logging interval in milliseconds |
+| `statsLogInterval` | int | `60000` | Request statistics logging interval in milliseconds |
 | `blockLagThreshold` | uint64 | `0` | Maximum allowed block lag before marking upstream unhealthy (0 = disabled) |
 | `blockTimeout` | int | `30000` | Time in milliseconds without receiving a new block before marking upstream unhealthy |
 
@@ -137,6 +139,7 @@ At least one of `rpcUrl` or `wsUrl` is required per upstream.
   "logLevel": "info",
   "blockLagThreshold": 3,
   "blockTimeout": 30000,
+  "statsLogInterval": 60000,
   "retryEnabled": true,
   "retryMaxAttempts": 3,
   "cache": {

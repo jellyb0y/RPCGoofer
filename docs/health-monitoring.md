@@ -191,6 +191,47 @@ INFO upstreams status group=ethereum maxBlock=1000000
 | healthyFallback | Fallback upstreams within lag threshold |
 | unhealthyFallback | Fallback upstreams exceeding lag threshold |
 
+## Request Statistics Logging
+
+Periodic logging of request counts per upstream provides visibility into traffic distribution.
+
+### Configuration
+
+```json
+{
+  "statsLogInterval": 60000  // Log every 60 seconds
+}
+```
+
+### Log Format
+
+```
+INFO request statistics group=ethereum totalRequests=150 interval=60s 
+     infura=80 alchemy=65 public-fallback=5
+```
+
+### Statistics Fields
+
+| Field | Description |
+|-------|-------------|
+| totalRequests | Total number of requests sent to all upstreams during the interval |
+| interval | Duration of the statistics collection period |
+| [upstream_name] | Number of requests sent to each specific upstream |
+
+### How It Works
+
+1. Each request to an upstream increments an atomic counter
+2. Batch requests increment the counter by the number of requests in the batch
+3. At each `statsLogInterval`, counters are read and reset to zero
+4. Statistics reflect requests sent during the previous interval only
+
+### Use Cases
+
+- **Load balancing verification**: Ensure traffic is distributed according to weights
+- **Upstream utilization monitoring**: Identify heavily/lightly used upstreams
+- **Fallback usage tracking**: Monitor how often fallback upstreams are used
+- **Capacity planning**: Understand request volumes per upstream
+
 ## Connection Management
 
 ### WebSocket Reconnection

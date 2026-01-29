@@ -22,6 +22,7 @@ type HealthMonitor struct {
 	blockTimeout      time.Duration
 	checkInterval     time.Duration
 	statusLogInterval time.Duration
+	statsLogInterval  time.Duration
 	logger            zerolog.Logger
 
 	ctx    context.Context
@@ -33,7 +34,7 @@ type HealthMonitor struct {
 }
 
 // NewHealthMonitor creates a new HealthMonitor
-func NewHealthMonitor(upstreams []*Upstream, blockLagThreshold uint64, blockTimeout time.Duration, checkInterval time.Duration, statusLogInterval time.Duration, logger zerolog.Logger) *HealthMonitor {
+func NewHealthMonitor(upstreams []*Upstream, blockLagThreshold uint64, blockTimeout time.Duration, checkInterval time.Duration, statusLogInterval time.Duration, statsLogInterval time.Duration, logger zerolog.Logger) *HealthMonitor {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &HealthMonitor{
@@ -42,6 +43,7 @@ func NewHealthMonitor(upstreams []*Upstream, blockLagThreshold uint64, blockTime
 		blockTimeout:      blockTimeout,
 		checkInterval:     checkInterval,
 		statusLogInterval: statusLogInterval,
+		statsLogInterval:  statsLogInterval,
 		logger:            logger,
 		ctx:               ctx,
 		cancel:            cancel,
@@ -70,6 +72,12 @@ func (hm *HealthMonitor) Start() {
 	if hm.blockTimeout > 0 {
 		hm.wg.Add(1)
 		go hm.checkBlockTimeouts()
+	}
+
+	// Start request statistics logging goroutine
+	if hm.statsLogInterval > 0 {
+		hm.wg.Add(1)
+		go hm.logRequestStats()
 	}
 }
 
@@ -176,6 +184,46 @@ func (hm *HealthMonitor) logCurrentStatus() {
 		Strs("healthyFallback", healthyFallback).
 		Strs("unhealthyFallback", unhealthyFallback).
 		Msg("upstreams status")
+}
+
+// logRequestStats periodically logs the request statistics of all upstreams
+func (hm *HealthMonitor) logRequestStats() {
+	defer hm.wg.Done()
+
+	ticker := time.NewTicker(hm.statsLogInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-hm.ctx.Done():
+			return
+		case <-ticker.C:
+			hm.logCurrentRequestStats()
+		}
+	}
+}
+
+// logCurrentRequestStats logs the current request statistics and resets counters
+func (hm *HealthMonitor) logCurrentRequestStats() {
+	var totalRequests uint64
+	requestStats := make(map[string]uint64)
+
+	for _, u := range hm.upstreams {
+		count := u.SwapRequestCount()
+		requestStats[u.Name()] = count
+		totalRequests += count
+	}
+
+	// Build log event with stats for each upstream
+	logEvent := hm.logger.Info().
+		Uint64("totalRequests", totalRequests).
+		Dur("interval", hm.statsLogInterval)
+
+	for _, u := range hm.upstreams {
+		logEvent = logEvent.Uint64(u.Name(), requestStats[u.Name()])
+	}
+
+	logEvent.Msg("request statistics")
 }
 
 // Stop stops health monitoring

@@ -32,6 +32,7 @@ type Status struct {
 	currentBlock    atomic.Uint64
 	lastBlockTime   time.Time
 	lastBlockTimeMu sync.RWMutex
+	requestCount    atomic.Uint64
 }
 
 // NewStatus creates a new Status
@@ -83,4 +84,19 @@ func (s *Status) UpdateBlock(block uint64) bool {
 			return true
 		}
 	}
+}
+
+// IncrementRequestCount increments the request counter
+func (s *Status) IncrementRequestCount() {
+	s.requestCount.Add(1)
+}
+
+// IncrementRequestCountBy increments the request counter by a given value
+func (s *Status) IncrementRequestCountBy(count uint64) {
+	s.requestCount.Add(count)
+}
+
+// SwapRequestCount returns the current request count and resets it to zero
+func (s *Status) SwapRequestCount() uint64 {
+	return s.requestCount.Swap(0)
 }
