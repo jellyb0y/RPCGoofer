@@ -2,6 +2,9 @@ version: "3.8"
 
 services:
   rpcgofer:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: jellyb0y/rpcgofer:latest
     container_name: rpcgofer
     restart: unless-stopped
