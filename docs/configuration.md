@@ -22,7 +22,8 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
   "cache": {
     "enabled": true,
     "ttl": 300,
-    "size": 10000
+    "size": 10000,
+    "disabledMethods": []
   },
   "groups": [
     {
@@ -81,6 +82,7 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
 | `cache.enabled` | bool | `false` | Enable response caching |
 | `cache.ttl` | int | - | Cache TTL in seconds (required if enabled) |
 | `cache.size` | int | - | Maximum cache entries (required if enabled) |
+| `cache.disabledMethods` | []string | `[]` | Methods to exclude from caching |
 
 ## Groups Configuration
 
@@ -137,7 +139,8 @@ At least one of `rpcUrl` or `wsUrl` is required per upstream.
   "cache": {
     "enabled": true,
     "ttl": 300,
-    "size": 50000
+    "size": 50000,
+    "disabledMethods": []
   },
   "groups": [
     {

@@ -31,9 +31,10 @@ type Config struct {
 
 // CacheConfig represents cache configuration
 type CacheConfig struct {
-	Enabled bool `json:"enabled"`
-	TTL     int  `json:"ttl"`  // seconds
-	Size    int  `json:"size"` // number of entries
+	Enabled         bool     `json:"enabled"`
+	TTL             int      `json:"ttl"`             // seconds
+	Size            int      `json:"size"`            // number of entries
+	DisabledMethods []string `json:"disabledMethods"` // methods to exclude from caching
 }
 
 // GroupConfig represents a group of upstreams

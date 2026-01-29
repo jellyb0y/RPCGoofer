@@ -40,6 +40,15 @@ func New(cfg *config.Config, logger zerolog.Logger) (*Server, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create cache: %w", err)
 		}
+
+		// Set disabled methods if configured
+		if len(cfg.Cache.DisabledMethods) > 0 {
+			cache.SetDisabledMethods(cfg.Cache.DisabledMethods)
+			logger.Info().
+				Strs("disabledMethods", cfg.Cache.DisabledMethods).
+				Msg("cache disabled for specific methods")
+		}
+
 		logger.Info().
 			Int("size", cfg.Cache.Size).
 			Int("ttl", cfg.Cache.TTL).

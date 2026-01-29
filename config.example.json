@@ -1,5 +1,5 @@
 {
-  "host": "localhost",
+  "host": "0.0.0.0",
   "rpcPort": 8545,
   "wsPort": 8546,
   "logLevel": "info",
@@ -10,7 +10,8 @@
   "cache": {
     "enabled": true,
     "ttl": 300,
-    "size": 10000
+    "size": 1000,
+    "disabledMethods": []
   },
   "groups": [
     {

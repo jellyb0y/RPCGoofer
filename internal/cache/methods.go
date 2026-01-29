@@ -73,8 +73,29 @@ var dynamicBlockTags = map[string]bool{
 	"finalized": true,
 }
 
+// disabledMethods holds methods that should not be cached (configured at runtime)
+var disabledMethods = make(map[string]bool)
+
+// SetDisabledMethods sets the list of methods that should not be cached
+func SetDisabledMethods(methods []string) {
+	disabledMethods = make(map[string]bool)
+	for _, method := range methods {
+		disabledMethods[method] = true
+	}
+}
+
+// IsMethodDisabled checks if a method is in the disabled list
+func IsMethodDisabled(method string) bool {
+	return disabledMethods[method]
+}
+
 // IsCacheable checks if a request is cacheable based on method and params
 func IsCacheable(method string, params json.RawMessage) bool {
+	// Check if method is explicitly disabled
+	if disabledMethods[method] {
+		return false
+	}
+
 	rule, exists := methodCacheRules[method]
 	if !exists {
 		return false

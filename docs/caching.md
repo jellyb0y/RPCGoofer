@@ -9,7 +9,8 @@ RPCGofer includes an intelligent caching system that stores responses for immuta
   "cache": {
     "enabled": true,
     "ttl": 300,
-    "size": 10000
+    "size": 10000,
+    "disabledMethods": ["eth_call", "eth_getLogs"]
   }
 }
 ```
@@ -19,6 +20,7 @@ RPCGofer includes an intelligent caching system that stores responses for immuta
 | `enabled` | Enable/disable caching |
 | `ttl` | Time-to-live in seconds |
 | `size` | Maximum number of cache entries |
+| `disabledMethods` | List of methods to exclude from caching |
 
 ## Cacheable Methods
 
@@ -240,6 +242,8 @@ DEBUG cached response method=eth_getBalance cacheKey=ethereum:eth_getBalance:a1b
 
 ## Disabling Cache
 
+### Disable Caching Entirely
+
 To disable caching entirely:
 
 ```json
@@ -251,3 +255,33 @@ To disable caching entirely:
 ```
 
 Or omit the `cache` section from configuration.
+
+### Disable Caching for Specific Methods
+
+You can disable caching for specific methods while keeping caching enabled for others:
+
+```json
+{
+  "cache": {
+    "enabled": true,
+    "ttl": 300,
+    "size": 10000,
+    "disabledMethods": ["eth_call", "eth_getLogs", "debug_traceCall"]
+  }
+}
+```
+
+This is useful when:
+- Some methods return data that changes frequently even with the same parameters
+- You need real-time data for specific operations
+- Debugging issues where cached responses may be problematic
+- Specific methods have high cardinality making caching inefficient
+
+**Example use cases:**
+
+| Use Case | Disabled Methods |
+|----------|------------------|
+| Real-time balance tracking | `eth_getBalance`, `eth_call` |
+| Fresh log queries | `eth_getLogs` |
+| Debug/trace accuracy | `debug_traceCall`, `trace_call` |
+| Nonce-sensitive operations | `eth_getTransactionCount` |
