@@ -55,6 +55,9 @@ func applyDefaults(cfg *Config) {
 		cfg.StatusLogInterval = DefaultStatusLogInterval
 	}
 	// BlockLagThreshold default is 0, which is valid
+	if cfg.BlockTimeout == 0 {
+		cfg.BlockTimeout = DefaultBlockTimeout
+	}
 	if cfg.DedupCacheSize == 0 {
 		cfg.DedupCacheSize = DefaultDedupCacheSize
 	}

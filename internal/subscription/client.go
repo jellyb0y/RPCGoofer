@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +14,11 @@ import (
 
 	"rpcgofer/internal/jsonrpc"
 	"rpcgofer/internal/upstream"
+)
+
+const (
+	// waitForMainBlockPollInterval is how often to check if main has the block
+	waitForMainBlockPollInterval = 50 * time.Millisecond
 )
 
 // ClientSession manages subscriptions for a single WebSocket client
@@ -194,6 +201,8 @@ func (cs *ClientSession) readUpstreamEvents(clientSub *ClientSubscription, upstr
 		clientSub.RemoveUpstreamSub(upstreamName)
 	}()
 
+	isMainUpstream := upSub.Upstream.IsMain()
+
 	for {
 		select {
 		case <-clientSub.CloseChan():
@@ -235,6 +244,22 @@ func (cs *ClientSession) readUpstreamEvents(clientSub *ClientSubscription, upstr
 			continue
 		}
 
+		// For newHeads from fallback upstream, wait until main has the block
+		// This prevents sending block notifications before main upstreams have the block,
+		// which would cause RPC requests (routed to main) to fail with "block not found"
+		if clientSub.Type == SubTypeNewHeads && !isMainUpstream {
+			blockNum, err := parseBlockNumber(notification.Params.Result)
+			if err != nil {
+				cs.logger.Warn().Err(err).Msg("failed to parse block number from newHeads")
+			} else {
+				// Wait for main to have the block, or for main to become unhealthy
+				if !cs.waitForMainBlock(blockNum, clientSub.CloseChan()) {
+					// Session is closing
+					return
+				}
+			}
+		}
+
 		// Create client notification with client's subscription ID
 		clientNotification := NewNotification(clientSub.ID, notification.Params.Result)
 		notifBytes, err := clientNotification.Bytes()
@@ -250,8 +275,64 @@ func (cs *ClientSession) readUpstreamEvents(clientSub *ClientSubscription, upstr
 			Str("upstream", upstreamName).
 			Str("subID", clientSub.ID).
 			Str("type", string(clientSub.Type)).
+			Bool("isMain", isMainUpstream).
 			Msg("forwarded event to client")
 	}
+}
+
+// waitForMainBlock waits until at least one main upstream has the specified block
+// Returns true if the block should be sent to client, false on session close
+// Logic:
+// - If main has the block -> send immediately
+// - If no healthy main upstreams -> send immediately (fallback is our only source)
+// - If main is healthy but doesn't have block yet -> wait
+func (cs *ClientSession) waitForMainBlock(blockNum uint64, closeChan <-chan struct{}) bool {
+	// Check immediately - main has the block
+	if cs.pool.GetMainMaxBlock() >= blockNum {
+		return true
+	}
+
+	// If no healthy main upstreams, allow fallback blocks through
+	if !cs.pool.HasHealthyMain() {
+		return true
+	}
+
+	ticker := time.NewTicker(waitForMainBlockPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-closeChan:
+			return false
+		case <-cs.closeChan:
+			return false
+		case <-ticker.C:
+			// Main has the block now
+			if cs.pool.GetMainMaxBlock() >= blockNum {
+				return true
+			}
+			// All main upstreams became unhealthy - allow fallback blocks
+			if !cs.pool.HasHealthyMain() {
+				return true
+			}
+			// Main is still healthy but doesn't have block - keep waiting
+		}
+	}
+}
+
+// parseBlockNumber extracts block number from newHeads result
+func parseBlockNumber(result json.RawMessage) (uint64, error) {
+	var header jsonrpc.BlockHeader
+	if err := json.Unmarshal(result, &header); err != nil {
+		return 0, err
+	}
+	return parseHexUint64(header.Number)
+}
+
+// parseHexUint64 parses a hex string (with 0x prefix) to uint64
+func parseHexUint64(hex string) (uint64, error) {
+	hex = strings.TrimPrefix(hex, "0x")
+	return strconv.ParseUint(hex, 16, 64)
 }
 
 // sendToClient sends messages from the subscription to the client

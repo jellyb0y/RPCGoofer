@@ -19,6 +19,7 @@ import (
 type HealthMonitor struct {
 	upstreams         []*Upstream
 	blockLagThreshold uint64
+	blockTimeout      time.Duration
 	checkInterval     time.Duration
 	statusLogInterval time.Duration
 	logger            zerolog.Logger
@@ -32,12 +33,13 @@ type HealthMonitor struct {
 }
 
 // NewHealthMonitor creates a new HealthMonitor
-func NewHealthMonitor(upstreams []*Upstream, blockLagThreshold uint64, checkInterval time.Duration, statusLogInterval time.Duration, logger zerolog.Logger) *HealthMonitor {
+func NewHealthMonitor(upstreams []*Upstream, blockLagThreshold uint64, blockTimeout time.Duration, checkInterval time.Duration, statusLogInterval time.Duration, logger zerolog.Logger) *HealthMonitor {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &HealthMonitor{
 		upstreams:         upstreams,
 		blockLagThreshold: blockLagThreshold,
+		blockTimeout:      blockTimeout,
 		checkInterval:     checkInterval,
 		statusLogInterval: statusLogInterval,
 		logger:            logger,
@@ -62,6 +64,61 @@ func (hm *HealthMonitor) Start() {
 	if hm.statusLogInterval > 0 {
 		hm.wg.Add(1)
 		go hm.logStatus()
+	}
+
+	// Start block timeout checker
+	if hm.blockTimeout > 0 {
+		hm.wg.Add(1)
+		go hm.checkBlockTimeouts()
+	}
+}
+
+// checkBlockTimeouts periodically checks if upstreams have timed out
+func (hm *HealthMonitor) checkBlockTimeouts() {
+	defer hm.wg.Done()
+
+	// Check more frequently than the timeout itself
+	checkInterval := hm.blockTimeout / 4
+	if checkInterval < 500*time.Millisecond {
+		checkInterval = 500 * time.Millisecond
+	}
+
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-hm.ctx.Done():
+			return
+		case <-ticker.C:
+			hm.checkAllTimeouts()
+		}
+	}
+}
+
+// checkAllTimeouts checks all upstreams for block timeout
+func (hm *HealthMonitor) checkAllTimeouts() {
+	now := time.Now()
+
+	for _, u := range hm.upstreams {
+		lastBlockTime := u.GetLastBlockTime()
+
+		// Skip if no block received yet
+		if lastBlockTime.IsZero() {
+			continue
+		}
+
+		timeSinceBlock := now.Sub(lastBlockTime)
+		if timeSinceBlock > hm.blockTimeout {
+			if u.IsHealthy() {
+				hm.logger.Warn().
+					Str("upstream", u.Name()).
+					Dur("timeSinceBlock", timeSinceBlock).
+					Dur("timeout", hm.blockTimeout).
+					Msg("upstream block timeout, marking unhealthy")
+				u.SetHealthy(false)
+			}
+		}
 	}
 }
 

@@ -21,6 +21,7 @@ type Config struct {
 	HealthCheckInterval       int           `json:"healthCheckInterval"`
 	StatusLogInterval         int           `json:"statusLogInterval"`
 	BlockLagThreshold         uint64        `json:"blockLagThreshold"`
+	BlockTimeout              int           `json:"blockTimeout"`
 	DedupCacheSize            int           `json:"dedupCacheSize"`
 	MaxSubscriptionsPerClient int           `json:"maxSubscriptionsPerClient"`
 	RetryEnabled              bool          `json:"retryEnabled"`
@@ -63,6 +64,7 @@ const (
 	DefaultHealthCheckInterval       = 10000    // ms
 	DefaultStatusLogInterval         = 5000     // ms
 	DefaultBlockLagThreshold         = uint64(0)
+	DefaultBlockTimeout              = 2000 // ms - time without new block before marking unhealthy
 	DefaultDedupCacheSize            = 10000
 	DefaultMaxSubscriptionsPerClient = 100
 	DefaultRetryEnabled              = true
@@ -84,6 +86,11 @@ func (c *Config) GetHealthCheckIntervalDuration() time.Duration {
 // GetStatusLogIntervalDuration returns status log interval as time.Duration
 func (c *Config) GetStatusLogIntervalDuration() time.Duration {
 	return time.Duration(c.StatusLogInterval) * time.Millisecond
+}
+
+// GetBlockTimeoutDuration returns block timeout as time.Duration
+func (c *Config) GetBlockTimeoutDuration() time.Duration {
+	return time.Duration(c.BlockTimeout) * time.Millisecond
 }
 
 // IsCacheEnabled returns true if cache is configured and enabled

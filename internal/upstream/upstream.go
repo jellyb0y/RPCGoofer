@@ -147,6 +147,11 @@ func (u *Upstream) UpdateBlock(block uint64) bool {
 	return u.status.UpdateBlock(block)
 }
 
+// GetLastBlockTime returns the time of the last block update
+func (u *Upstream) GetLastBlockTime() time.Time {
+	return u.status.GetLastBlockTime()
+}
+
 // HasRPC returns true if HTTP RPC URL is configured
 func (u *Upstream) HasRPC() bool {
 	return u.rpcURL != ""

@@ -1,8 +1,11 @@
 package upstream
 
 import (
-	"rpcgofer/internal/config"
+	"sync"
 	"sync/atomic"
+	"time"
+
+	"rpcgofer/internal/config"
 )
 
 // Role represents the upstream role
@@ -25,8 +28,10 @@ func RoleFromConfig(r config.Role) Role {
 
 // Status represents the health status of an upstream
 type Status struct {
-	healthy      atomic.Bool
-	currentBlock atomic.Uint64
+	healthy         atomic.Bool
+	currentBlock    atomic.Uint64
+	lastBlockTime   time.Time
+	lastBlockTimeMu sync.RWMutex
 }
 
 // NewStatus creates a new Status
@@ -56,6 +61,13 @@ func (s *Status) SetCurrentBlock(block uint64) {
 	s.currentBlock.Store(block)
 }
 
+// GetLastBlockTime returns the time of the last block update
+func (s *Status) GetLastBlockTime() time.Time {
+	s.lastBlockTimeMu.RLock()
+	defer s.lastBlockTimeMu.RUnlock()
+	return s.lastBlockTime
+}
+
 // UpdateBlock updates the block if the new value is higher
 // Returns true if the block was updated
 func (s *Status) UpdateBlock(block uint64) bool {
@@ -65,6 +77,9 @@ func (s *Status) UpdateBlock(block uint64) bool {
 			return false
 		}
 		if s.currentBlock.CompareAndSwap(current, block) {
+			s.lastBlockTimeMu.Lock()
+			s.lastBlockTime = time.Now()
+			s.lastBlockTimeMu.Unlock()
 			return true
 		}
 	}

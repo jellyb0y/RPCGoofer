@@ -4,6 +4,7 @@
   "wsPort": 8546,
   "logLevel": "info",
   "blockLagThreshold": 0,
+  "blockTimeout": 30000,
   "statusLogInterval": 5000,
   "retryEnabled": true,
   "retryMaxAttempts": 3,
