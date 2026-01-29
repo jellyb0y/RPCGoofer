@@ -136,6 +136,90 @@ WebSocket handling:
 6. Mark upstream unhealthy if lag > threshold
 ```
 
+## Batch Requests
+
+RPCGofer natively supports JSON-RPC batch requests as defined in the JSON-RPC 2.0 specification.
+
+### What is a Batch Request
+
+A batch request is a JSON array containing multiple JSON-RPC request objects sent in a single HTTP request:
+
+```json
+[
+  {"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1},
+  {"jsonrpc": "2.0", "method": "eth_chainId", "params": [], "id": 2},
+  {"jsonrpc": "2.0", "method": "eth_getBalance", "params": ["0x...", "latest"], "id": 3}
+]
+```
+
+The response is also a JSON array with corresponding results:
+
+```json
+[
+  {"jsonrpc": "2.0", "result": "0x1234567", "id": 1},
+  {"jsonrpc": "2.0", "result": "0x1", "id": 2},
+  {"jsonrpc": "2.0", "result": "0x1bc16d674ec80000", "id": 3}
+]
+```
+
+### How Batch Processing Works
+
+```
+1. Client sends batch request (JSON array)
+2. Handler detects batch by checking first character '['
+3. Parse all requests in the batch
+4. For each request:
+   a. Check if method is cacheable
+   b. Lookup in cache
+   c. Collect cache hits and misses
+5. Send only uncached requests to upstream as batch
+6. Upstream returns batch response
+7. Cache successful responses individually
+8. Merge cached and upstream responses
+9. Return complete batch response to client
+```
+
+### Batch Request Features
+
+| Feature | Description |
+|---------|-------------|
+| Automatic detection | Single vs batch determined by first character |
+| Per-request caching | Each request in batch checked against cache individually |
+| Atomic upstream call | Uncached requests sent as single batch to one upstream |
+| Retry as unit | On failure, entire batch retried on next upstream |
+| Response ordering | Responses returned in same order as requests |
+
+### Batch Request Example
+
+```bash
+curl -X POST http://localhost:8545/ethereum \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1},
+    {"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":2}
+  ]'
+```
+
+### Batch over WebSocket
+
+Batch requests are also supported over WebSocket connections:
+
+```javascript
+ws.send(JSON.stringify([
+  {"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1},
+  {"jsonrpc": "2.0", "method": "eth_gasPrice", "params": [], "id": 2}
+]));
+```
+
+Note: Subscription methods (`eth_subscribe`, `eth_unsubscribe`) in batch are processed individually, not as part of the batch response.
+
+### Performance Considerations
+
+- **Reduced latency**: Multiple requests in single HTTP roundtrip
+- **Cache efficiency**: Cached responses returned immediately, only misses go to upstream
+- **Network optimization**: Single connection used for entire batch
+- **Error isolation**: Individual request errors don't fail entire batch
+
 ## Concurrency Model
 
 - Each upstream pool runs independent health monitoring goroutines

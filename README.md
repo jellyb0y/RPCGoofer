@@ -93,10 +93,18 @@ After starting RPCGofer, endpoints become available at:
 Example requests:
 
 ```bash
-# HTTP RPC request
+# Single HTTP RPC request
 curl -X POST http://localhost:8545/ethereum \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+
+# Batch HTTP RPC request
+curl -X POST http://localhost:8545/ethereum \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1},
+    {"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":2}
+  ]'
 
 # WebSocket subscription (using wscat)
 wscat -c ws://localhost:8546/ethereum
