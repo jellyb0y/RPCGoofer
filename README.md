@@ -15,12 +15,29 @@ High-performance JSON-RPC proxy for Ethereum-compatible blockchain nodes with bu
 
 ## Quick Start
 
-### Using Docker
+### Using Docker Hub Image
+
+```bash
+# Pull the image
+docker pull jellyb0y/rpcgofer:latest
+
+# Create config.json file (see Configuration Example below)
+
+# Run container
+docker run -d \
+  --name rpcgofer \
+  -p 8545:8545 \
+  -p 8546:8546 \
+  -v $(pwd)/config.json:/app/config.json:ro \
+  jellyb0y/rpcgofer:latest
+```
+
+### Using Docker Compose
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-repo/rpcgofer.git
-cd rpcgofer
+git clone https://github.com/jellyb0y/RPCGofer.git
+cd RPCGofer
 
 # Copy and edit configuration
 cp config.example.json config.json

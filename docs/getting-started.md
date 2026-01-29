@@ -7,15 +7,21 @@
 
 ## Installation
 
+### Using Docker Hub Image
+
+```bash
+docker pull jellyb0y/rpcgofer:latest
+```
+
 ### Building from Source
 
 ```bash
-git clone https://github.com/your-repo/rpcgofer.git
-cd rpcgofer
+git clone https://github.com/jellyb0y/RPCGofer.git
+cd RPCGofer
 go build -o rpcgofer ./cmd/rpcgofer
 ```
 
-### Using Docker
+### Building Docker Image Locally
 
 ```bash
 docker build -t rpcgofer .
@@ -95,7 +101,18 @@ wscat -c ws://localhost:8546/ethereum
 docker-compose up -d
 ```
 
-### Using Docker Directly
+### Using Docker Hub Image
+
+```bash
+docker run -d \
+  --name rpcgofer \
+  -p 8545:8545 \
+  -p 8546:8546 \
+  -v $(pwd)/config.json:/app/config.json:ro \
+  jellyb0y/rpcgofer:latest
+```
+
+### Using Locally Built Image
 
 ```bash
 docker run -d \

@@ -7,8 +7,8 @@ This guide covers various deployment options for RPCGofer.
 ### Using Pre-built Image
 
 ```bash
-# Pull image (if published)
-docker pull your-registry/rpcgofer:latest
+# Pull image from Docker Hub
+docker pull jellyb0y/rpcgofer:latest
 
 # Run with config file
 docker run -d \
@@ -16,7 +16,7 @@ docker run -d \
   -p 8545:8545 \
   -p 8546:8546 \
   -v $(pwd)/config.json:/app/config.json:ro \
-  your-registry/rpcgofer:latest
+  jellyb0y/rpcgofer:latest
 ```
 
 ### Building Docker Image
@@ -116,7 +116,7 @@ version: "3.8"
 
 services:
   rpcgofer:
-    image: rpcgofer:latest
+    image: jellyb0y/rpcgofer:latest
     container_name: rpcgofer
     restart: always
     ports:
@@ -164,8 +164,8 @@ networks:
 
 ```bash
 # Clone repository
-git clone https://github.com/your-repo/rpcgofer.git
-cd rpcgofer
+git clone https://github.com/jellyb0y/RPCGofer.git
+cd RPCGofer
 
 # Download dependencies
 go mod download
@@ -304,7 +304,7 @@ version: "3.8"
 
 services:
   rpcgofer:
-    image: rpcgofer:latest
+    image: jellyb0y/rpcgofer:latest
     labels:
       - "traefik.enable=true"
       # HTTP RPC
