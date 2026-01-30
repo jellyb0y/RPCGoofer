@@ -101,8 +101,8 @@ func (c *Client) readPump(ctx context.Context) {
 			return
 		}
 
-		// Process the message
-		c.handleMessage(ctx, data)
+		// Process the message in a separate goroutine for parallel handling
+		go c.handleMessage(ctx, data)
 	}
 }
 
