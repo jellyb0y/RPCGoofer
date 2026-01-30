@@ -185,22 +185,19 @@ func (a *Aggregator) flush(ctx context.Context, groupName string, batchKey Batch
 		return
 	}
 
-	items, totalCount := bucket.TakeItems()
-	a.mu.Unlock()
-
-	if items == nil || len(items) == 0 {
+	if bucket.IsEmpty() {
+		a.mu.Unlock()
 		return
 	}
 
-	defer func() {
-		a.mu.Lock()
-		bucket.Reset()
-		// Clean up empty bucket
-		if bucket.IsEmpty() {
-			delete(groupBuckets, batchKey)
-		}
-		a.mu.Unlock()
-	}()
+	newBucket := NewBatchBucket(bucket.GetMethod(), bucket.GetKeyParams(), bucket.GetConfig())
+	groupBuckets[batchKey] = newBucket
+	a.mu.Unlock()
+
+	items, totalCount := bucket.TakeItems()
+	if items == nil || len(items) == 0 {
+		return
+	}
 
 	// Aggregate all elements
 	aggregated := make([]interface{}, 0, totalCount)
