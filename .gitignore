@@ -27,3 +27,7 @@ config.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Cutsom plugins
+/plugins/*
+!/plugins/isContract.js
