@@ -38,8 +38,9 @@ type Client struct {
 	retryConfig     proxy.RetryConfig
 	logger          zerolog.Logger
 
-	sendChan  chan []byte
-	closeChan chan struct{}
+	sendChan    chan []byte
+	sendTimeout time.Duration
+	closeChan   chan struct{}
 	closeOnce sync.Once
 }
 
@@ -57,9 +58,10 @@ func NewClient(conn *websocket.Conn, pool *upstream.Pool, groupName string, rpcC
 			Enabled:     cfg.RetryEnabled,
 			MaxAttempts: cfg.RetryMaxAttempts,
 		},
-		logger:    logger,
-		sendChan:  make(chan []byte, 256),
-		closeChan: make(chan struct{}),
+		logger:       logger,
+		sendChan:     make(chan []byte, 2048),
+		sendTimeout:  cfg.GetWSSendTimeoutDuration(),
+		closeChan:    make(chan struct{}),
 	}
 }
 
@@ -419,9 +421,9 @@ func (c *Client) send(data []byte) {
 	select {
 	case c.sendChan <- data:
 	case <-c.closeChan:
-	default:
-		// Channel full, drop message
-		c.logger.Warn().Msg("send channel full, dropping message")
+	case <-time.After(c.sendTimeout):
+		c.logger.Warn().Msg("send channel full, closing connection")
+		c.Close()
 	}
 }
 

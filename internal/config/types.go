@@ -29,6 +29,7 @@ type Config struct {
 	MaxSubscriptionsPerClient int           `json:"maxSubscriptionsPerClient"`
 	RetryEnabled              bool           `json:"retryEnabled"`
 	RetryMaxAttempts          int            `json:"retryMaxAttempts"`
+	WSSendTimeout             int            `json:"wsSendTimeout"`             // ms - timeout for sending to client WebSocket; 0 = use default
 	Cache                     *CacheConfig    `json:"cache,omitempty"`
 	Plugins                   *PluginConfig   `json:"plugins,omitempty"`
 	Batching                  *BatchingConfig `json:"batching,omitempty"`
@@ -104,6 +105,7 @@ const (
 	DefaultPluginTimeout             = 30000 // ms - default plugin execution timeout
 	DefaultBatchMaxSize              = 100   // default maximum batch size
 	DefaultBatchMaxWait              = 500   // ms - default maximum wait time for batching
+	DefaultWSSendTimeout             = 10000 // ms - default timeout for sending to client WebSocket (10s)
 )
 
 // GetRequestTimeoutDuration returns request timeout as time.Duration
@@ -139,6 +141,14 @@ func (c *Config) GetUpstreamMessageTimeoutDuration() time.Duration {
 // GetUpstreamReconnectIntervalDuration returns upstream reconnect interval as time.Duration
 func (c *Config) GetUpstreamReconnectIntervalDuration() time.Duration {
 	return time.Duration(c.UpstreamReconnectInterval) * time.Millisecond
+}
+
+// GetWSSendTimeoutDuration returns WebSocket send timeout as time.Duration
+func (c *Config) GetWSSendTimeoutDuration() time.Duration {
+	if c.WSSendTimeout <= 0 {
+		return time.Duration(DefaultWSSendTimeout) * time.Millisecond
+	}
+	return time.Duration(c.WSSendTimeout) * time.Millisecond
 }
 
 // IsCacheEnabled returns true if cache is configured and enabled

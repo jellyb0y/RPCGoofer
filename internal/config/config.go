@@ -78,6 +78,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.RetryMaxAttempts == 0 {
 		cfg.RetryMaxAttempts = DefaultRetryMaxAttempts
 	}
+	if cfg.WSSendTimeout == 0 {
+		cfg.WSSendTimeout = DefaultWSSendTimeout
+	}
 
 	// Apply defaults to upstreams
 	for i := range cfg.Groups {
