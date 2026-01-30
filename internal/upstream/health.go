@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,7 @@ type HealthMonitor struct {
 	logger             zerolog.Logger
 
 	newHeadsProvider NewHeadsProvider
+	methodStats      *MethodStats
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -62,6 +64,11 @@ func NewHealthMonitor(upstreams []*Upstream, blockLagThreshold uint64, lagRecove
 // SetNewHeadsProvider sets the provider for newHeads events
 func (hm *HealthMonitor) SetNewHeadsProvider(provider NewHeadsProvider) {
 	hm.newHeadsProvider = provider
+}
+
+// SetMethodStats sets the method stats for tracking method calls
+func (hm *HealthMonitor) SetMethodStats(stats *MethodStats) {
+	hm.methodStats = stats
 }
 
 // ID implements NewHeadsSubscriber interface
@@ -280,24 +287,71 @@ func (hm *HealthMonitor) logRequestStats() {
 // logCurrentRequestStats logs the current request statistics and resets counters
 func (hm *HealthMonitor) logCurrentRequestStats() {
 	var totalRequests uint64
+	var totalSubEvents uint64
 	requestStats := make(map[string]uint64)
+	subEventStats := make(map[string]uint64)
+	subCountStats := make(map[string]int64)
 
 	for _, u := range hm.upstreams {
-		count := u.SwapRequestCount()
-		requestStats[u.Name()] = count
-		totalRequests += count
+		reqCount := u.SwapRequestCount()
+		requestStats[u.Name()] = reqCount
+		totalRequests += reqCount
+
+		subEventCount := u.SwapSubscriptionEvents()
+		subEventStats[u.Name()] = subEventCount
+		totalSubEvents += subEventCount
+
+		subCountStats[u.Name()] = u.GetSubscriptionCount()
 	}
 
-	// Build log event with stats for each upstream
-	logEvent := hm.logger.Info().
-		Uint64("totalRequests", totalRequests).
-		Dur("interval", hm.statsLogInterval)
+	// Get top methods
+	var topMethods []MethodCount
+	if hm.methodStats != nil {
+		topMethods = hm.methodStats.SwapAndGetTop(15)
+	}
 
+	// Build formatted statistics string
+	stats := hm.formatStats(totalRequests, totalSubEvents, requestStats, subEventStats, subCountStats, topMethods)
+
+	hm.logger.Info().
+		Dur("interval", hm.statsLogInterval).
+		Msg(stats)
+}
+
+// formatStats formats statistics as a readable string with indentation
+func (hm *HealthMonitor) formatStats(
+	totalRequests uint64,
+	totalSubEvents uint64,
+	requestStats map[string]uint64,
+	subEventStats map[string]uint64,
+	subCountStats map[string]int64,
+	topMethods []MethodCount,
+) string {
+	var buf bytes.Buffer
+
+	buf.WriteString("request statistics\n")
+	buf.WriteString(fmt.Sprintf("  total_requests: %d\n", totalRequests))
+	buf.WriteString(fmt.Sprintf("  total_sub_events: %d\n", totalSubEvents))
+
+	// Upstreams section
+	buf.WriteString("  upstreams:\n")
 	for _, u := range hm.upstreams {
-		logEvent = logEvent.Uint64(u.Name(), requestStats[u.Name()])
+		name := u.Name()
+		buf.WriteString(fmt.Sprintf("    %s:\n", name))
+		buf.WriteString(fmt.Sprintf("      requests: %d\n", requestStats[name]))
+		buf.WriteString(fmt.Sprintf("      subscriptions: %d\n", subCountStats[name]))
+		buf.WriteString(fmt.Sprintf("      sub_events: %d\n", subEventStats[name]))
 	}
 
-	logEvent.Msg("request statistics")
+	// Top methods section
+	if len(topMethods) > 0 {
+		buf.WriteString("  top_methods:\n")
+		for i, m := range topMethods {
+			buf.WriteString(fmt.Sprintf("    %2d. %-40s %d\n", i+1, m.Method, m.Count))
+		}
+	}
+
+	return buf.String()
 }
 
 // Stop stops health monitoring

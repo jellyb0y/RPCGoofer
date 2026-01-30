@@ -162,6 +162,31 @@ func (u *Upstream) SwapRequestCount() uint64 {
 	return u.status.SwapRequestCount()
 }
 
+// IncrementSubscriptionCount increments the subscription counter
+func (u *Upstream) IncrementSubscriptionCount() {
+	u.status.IncrementSubscriptionCount()
+}
+
+// DecrementSubscriptionCount decrements the subscription counter
+func (u *Upstream) DecrementSubscriptionCount() {
+	u.status.DecrementSubscriptionCount()
+}
+
+// GetSubscriptionCount returns the current subscription count
+func (u *Upstream) GetSubscriptionCount() int64 {
+	return u.status.GetSubscriptionCount()
+}
+
+// IncrementSubscriptionEvents increments the subscription events counter
+func (u *Upstream) IncrementSubscriptionEvents() {
+	u.status.IncrementSubscriptionEvents()
+}
+
+// SwapSubscriptionEvents returns the current subscription events count and resets it to zero
+func (u *Upstream) SwapSubscriptionEvents() uint64 {
+	return u.status.SwapSubscriptionEvents()
+}
+
 // GetLastBlockTime returns the time of the last block update
 func (u *Upstream) GetLastBlockTime() time.Time {
 	return u.status.GetLastBlockTime()

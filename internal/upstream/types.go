@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,11 +46,13 @@ func RoleFromConfig(r config.Role) Role {
 
 // Status represents the health status of an upstream
 type Status struct {
-	healthy         atomic.Bool
-	currentBlock    atomic.Uint64
-	lastBlockTime   time.Time
-	lastBlockTimeMu sync.RWMutex
-	requestCount    atomic.Uint64
+	healthy            atomic.Bool
+	currentBlock       atomic.Uint64
+	lastBlockTime      time.Time
+	lastBlockTimeMu    sync.RWMutex
+	requestCount       atomic.Uint64
+	subscriptionCount  atomic.Int64
+	subscriptionEvents atomic.Uint64
 }
 
 // NewStatus creates a new Status
@@ -116,4 +119,122 @@ func (s *Status) IncrementRequestCountBy(count uint64) {
 // SwapRequestCount returns the current request count and resets it to zero
 func (s *Status) SwapRequestCount() uint64 {
 	return s.requestCount.Swap(0)
+}
+
+// IncrementSubscriptionCount increments the subscription counter
+func (s *Status) IncrementSubscriptionCount() {
+	s.subscriptionCount.Add(1)
+}
+
+// DecrementSubscriptionCount decrements the subscription counter
+func (s *Status) DecrementSubscriptionCount() {
+	s.subscriptionCount.Add(-1)
+}
+
+// GetSubscriptionCount returns the current subscription count
+func (s *Status) GetSubscriptionCount() int64 {
+	return s.subscriptionCount.Load()
+}
+
+// IncrementSubscriptionEvents increments the subscription events counter
+func (s *Status) IncrementSubscriptionEvents() {
+	s.subscriptionEvents.Add(1)
+}
+
+// SwapSubscriptionEvents returns the current subscription events count and resets it to zero
+func (s *Status) SwapSubscriptionEvents() uint64 {
+	return s.subscriptionEvents.Swap(0)
+}
+
+// MethodStats tracks method call statistics
+type MethodStats struct {
+	counts map[string]*atomic.Uint64
+	mu     sync.RWMutex
+}
+
+// NewMethodStats creates a new MethodStats
+func NewMethodStats() *MethodStats {
+	return &MethodStats{
+		counts: make(map[string]*atomic.Uint64),
+	}
+}
+
+// Increment increments the count for a method
+func (m *MethodStats) Increment(method string) {
+	m.mu.RLock()
+	counter, exists := m.counts[method]
+	m.mu.RUnlock()
+
+	if exists {
+		counter.Add(1)
+		return
+	}
+
+	m.mu.Lock()
+	// Double check after acquiring write lock
+	if counter, exists = m.counts[method]; exists {
+		m.mu.Unlock()
+		counter.Add(1)
+		return
+	}
+	counter = &atomic.Uint64{}
+	counter.Store(1)
+	m.counts[method] = counter
+	m.mu.Unlock()
+}
+
+// IncrementBy increments the count for a method by a given value
+func (m *MethodStats) IncrementBy(method string, count uint64) {
+	m.mu.RLock()
+	counter, exists := m.counts[method]
+	m.mu.RUnlock()
+
+	if exists {
+		counter.Add(count)
+		return
+	}
+
+	m.mu.Lock()
+	// Double check after acquiring write lock
+	if counter, exists = m.counts[method]; exists {
+		m.mu.Unlock()
+		counter.Add(count)
+		return
+	}
+	counter = &atomic.Uint64{}
+	counter.Store(count)
+	m.counts[method] = counter
+	m.mu.Unlock()
+}
+
+// MethodCount represents a method and its count
+type MethodCount struct {
+	Method string
+	Count  uint64
+}
+
+// SwapAndGetTop returns top N methods by count and resets all counters
+func (m *MethodStats) SwapAndGetTop(n int) []MethodCount {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	result := make([]MethodCount, 0, len(m.counts))
+	for method, counter := range m.counts {
+		count := counter.Swap(0)
+		if count > 0 {
+			result = append(result, MethodCount{Method: method, Count: count})
+		}
+	}
+
+	// Sort by count descending
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Count > result[j].Count
+	})
+
+	// Return top N
+	if len(result) > n {
+		result = result[:n]
+	}
+
+	return result
 }

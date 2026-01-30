@@ -138,6 +138,11 @@ func (c *Client) handleMessage(ctx context.Context, data []byte) {
 		return
 	}
 
+	// Record method calls
+	for _, req := range requests {
+		c.pool.RecordMethod(req.Method)
+	}
+
 	if isBatch {
 		c.handleBatch(ctx, requests)
 	} else {

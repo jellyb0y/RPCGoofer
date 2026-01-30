@@ -89,6 +89,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	groupName := extractGroupName(r.URL.Path)
 
+	// Record method calls
+	for _, req := range requests {
+		pool.RecordMethod(req.Method)
+	}
+
 	// Execute request(s)
 	if isBatch {
 		responses := h.executeBatchWithCache(ctx, pool, groupName, requests)

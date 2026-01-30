@@ -199,7 +199,7 @@ INFO upstreams status group=ethereum maxBlock=1000000
 
 ## Request Statistics Logging
 
-Periodic logging of request counts per upstream provides visibility into traffic distribution.
+Periodic logging of request counts, subscription statistics, and popular methods provides visibility into traffic distribution and usage patterns.
 
 ### Configuration
 
@@ -212,24 +212,57 @@ Periodic logging of request counts per upstream provides visibility into traffic
 ### Log Format
 
 ```
-INFO request statistics group=ethereum totalRequests=150 interval=60s 
-     infura=80 alchemy=65 public-fallback=5
+INFO request statistics interval=60s
+  total_requests: 1523
+  total_sub_events: 48
+  upstreams:
+    alchemy:
+      requests: 812
+      subscriptions: 2
+      sub_events: 24
+    infura:
+      requests: 711
+      subscriptions: 2
+      sub_events: 24
+  top_methods:
+     1. eth_call                                  456
+     2. eth_getBalance                            234
+     3. eth_blockNumber                           189
+     4. eth_getTransactionReceipt                 156
+     5. eth_getLogs                               123
+     6. eth_getBlockByNumber                      98
+     7. eth_subscribe                             67
+     8. eth_chainId                               54
+     9. eth_gasPrice                              43
+    10. eth_getCode                               32
+    11. eth_estimateGas                           28
+    12. eth_getTransactionByHash                  21
+    13. eth_sendRawTransaction                    12
+    14. eth_getBlockByHash                        8
+    15. eth_unsubscribe                           2
 ```
 
 ### Statistics Fields
 
 | Field | Description |
 |-------|-------------|
-| totalRequests | Total number of requests sent to all upstreams during the interval |
-| interval | Duration of the statistics collection period |
-| [upstream_name] | Number of requests sent to each specific upstream |
+| total_requests | Total HTTP requests sent to all upstreams during the interval |
+| total_sub_events | Total subscription events received from all upstreams |
+| upstreams | Per-upstream breakdown of statistics |
+| upstreams.[name].requests | HTTP requests sent to this upstream |
+| upstreams.[name].subscriptions | Active WebSocket subscriptions on this upstream |
+| upstreams.[name].sub_events | Subscription events received from this upstream |
+| top_methods | Top 15 most called JSON-RPC methods during the interval |
 
 ### How It Works
 
 1. Each request to an upstream increments an atomic counter
 2. Batch requests increment the counter by the number of requests in the batch
-3. At each `statsLogInterval`, counters are read and reset to zero
-4. Statistics reflect requests sent during the previous interval only
+3. Each subscription event from an upstream increments the sub_events counter
+4. Active subscription count is tracked per upstream
+5. Method calls are tracked globally and sorted by frequency
+6. At each `statsLogInterval`, counters are read and reset to zero
+7. Statistics reflect activity during the previous interval only
 
 ### Use Cases
 
@@ -237,6 +270,9 @@ INFO request statistics group=ethereum totalRequests=150 interval=60s
 - **Upstream utilization monitoring**: Identify heavily/lightly used upstreams
 - **Fallback usage tracking**: Monitor how often fallback upstreams are used
 - **Capacity planning**: Understand request volumes per upstream
+- **Subscription health**: Monitor subscription event flow from each upstream
+- **API usage analysis**: Identify most popular methods for optimization
+- **Client behavior patterns**: Understand what methods clients call most frequently
 
 ## Connection Management
 
