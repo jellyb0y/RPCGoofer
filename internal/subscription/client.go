@@ -299,6 +299,11 @@ func (s *clientSubscriber) Close() {
 	close(s.closeChan)
 }
 
+// SkipDedup implements Subscriber interface
+func (s *clientSubscriber) SkipDedup() bool {
+	return false // Clients need deduplication
+}
+
 // parseBlockNumber extracts block number from newHeads result
 func parseBlockNumber(result json.RawMessage) (uint64, error) {
 	var header jsonrpc.BlockHeader
