@@ -17,13 +17,13 @@ import (
 
 // HealthMonitor monitors the health of upstreams in a group
 type HealthMonitor struct {
-	upstreams         []*Upstream
-	blockLagThreshold uint64
-	blockTimeout      time.Duration
-	checkInterval     time.Duration
-	statusLogInterval time.Duration
-	statsLogInterval  time.Duration
-	logger            zerolog.Logger
+	upstreams          []*Upstream
+	blockLagThreshold  uint64
+	lagRecoveryTimeout time.Duration
+	checkInterval      time.Duration
+	statusLogInterval  time.Duration
+	statsLogInterval   time.Duration
+	logger             zerolog.Logger
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -34,19 +34,19 @@ type HealthMonitor struct {
 }
 
 // NewHealthMonitor creates a new HealthMonitor
-func NewHealthMonitor(upstreams []*Upstream, blockLagThreshold uint64, blockTimeout time.Duration, checkInterval time.Duration, statusLogInterval time.Duration, statsLogInterval time.Duration, logger zerolog.Logger) *HealthMonitor {
+func NewHealthMonitor(upstreams []*Upstream, blockLagThreshold uint64, lagRecoveryTimeout time.Duration, checkInterval time.Duration, statusLogInterval time.Duration, statsLogInterval time.Duration, logger zerolog.Logger) *HealthMonitor {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &HealthMonitor{
-		upstreams:         upstreams,
-		blockLagThreshold: blockLagThreshold,
-		blockTimeout:      blockTimeout,
-		checkInterval:     checkInterval,
-		statusLogInterval: statusLogInterval,
-		statsLogInterval:  statsLogInterval,
-		logger:            logger,
-		ctx:               ctx,
-		cancel:            cancel,
+		upstreams:          upstreams,
+		blockLagThreshold:  blockLagThreshold,
+		lagRecoveryTimeout: lagRecoveryTimeout,
+		checkInterval:      checkInterval,
+		statusLogInterval:  statusLogInterval,
+		statsLogInterval:   statsLogInterval,
+		logger:             logger,
+		ctx:                ctx,
+		cancel:             cancel,
 	}
 }
 
@@ -68,65 +68,10 @@ func (hm *HealthMonitor) Start() {
 		go hm.logStatus()
 	}
 
-	// Start block timeout checker
-	if hm.blockTimeout > 0 {
-		hm.wg.Add(1)
-		go hm.checkBlockTimeouts()
-	}
-
 	// Start request statistics logging goroutine
 	if hm.statsLogInterval > 0 {
 		hm.wg.Add(1)
 		go hm.logRequestStats()
-	}
-}
-
-// checkBlockTimeouts periodically checks if upstreams have timed out
-func (hm *HealthMonitor) checkBlockTimeouts() {
-	defer hm.wg.Done()
-
-	// Check more frequently than the timeout itself
-	checkInterval := hm.blockTimeout / 4
-	if checkInterval < 500*time.Millisecond {
-		checkInterval = 500 * time.Millisecond
-	}
-
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-hm.ctx.Done():
-			return
-		case <-ticker.C:
-			hm.checkAllTimeouts()
-		}
-	}
-}
-
-// checkAllTimeouts checks all upstreams for block timeout
-func (hm *HealthMonitor) checkAllTimeouts() {
-	now := time.Now()
-
-	for _, u := range hm.upstreams {
-		lastBlockTime := u.GetLastBlockTime()
-
-		// Skip if no block received yet
-		if lastBlockTime.IsZero() {
-			continue
-		}
-
-		timeSinceBlock := now.Sub(lastBlockTime)
-		if timeSinceBlock > hm.blockTimeout {
-			if u.IsHealthy() {
-				hm.logger.Warn().
-					Str("upstream", u.Name()).
-					Dur("timeSinceBlock", timeSinceBlock).
-					Dur("timeout", hm.blockTimeout).
-					Msg("upstream block timeout, marking unhealthy")
-				u.SetHealthy(false)
-			}
-		}
 	}
 }
 
@@ -333,8 +278,15 @@ func (hm *HealthMonitor) subscribeNewHeads(u *Upstream) error {
 		}
 
 		u.UpdateBlock(blockNum)
-		hm.updateMaxBlock(blockNum)
-		hm.updateHealthStatus(u)
+		isNewMax := hm.updateMaxBlock(blockNum)
+
+		if isNewMax {
+			// New max block - give other upstreams time to catch up
+			hm.scheduleLagCheck(blockNum)
+		}
+
+		// Check if this upstream caught up
+		hm.checkUpstreamCaughtUp(u)
 
 		hm.logger.Debug().
 			Str("upstream", u.Name()).
@@ -408,8 +360,15 @@ func (hm *HealthMonitor) pollBlockNumber(u *Upstream) {
 	}
 
 	u.UpdateBlock(blockNum)
-	hm.updateMaxBlock(blockNum)
-	hm.updateHealthStatus(u)
+	isNewMax := hm.updateMaxBlock(blockNum)
+
+	if isNewMax {
+		// New max block - give other upstreams time to catch up
+		hm.scheduleLagCheck(blockNum)
+	}
+
+	// Check if this upstream caught up
+	hm.checkUpstreamCaughtUp(u)
 
 	hm.logger.Debug().
 		Str("upstream", u.Name()).
@@ -418,13 +377,16 @@ func (hm *HealthMonitor) pollBlockNumber(u *Upstream) {
 }
 
 // updateMaxBlock updates the maximum block number seen across all upstreams
-func (hm *HealthMonitor) updateMaxBlock(block uint64) {
+// Returns true if this is a new maximum block
+func (hm *HealthMonitor) updateMaxBlock(block uint64) bool {
 	hm.mu.Lock()
 	defer hm.mu.Unlock()
 
 	if block > hm.maxBlock {
 		hm.maxBlock = block
+		return true
 	}
+	return false
 }
 
 // GetMaxBlock returns the maximum block number
@@ -434,8 +396,49 @@ func (hm *HealthMonitor) GetMaxBlock() uint64 {
 	return hm.maxBlock
 }
 
-// updateHealthStatus updates the health status of an upstream based on block lag
-func (hm *HealthMonitor) updateHealthStatus(u *Upstream) {
+// scheduleLagCheck schedules a health check for a specific block after lagRecoveryTimeout
+func (hm *HealthMonitor) scheduleLagCheck(targetBlock uint64) {
+	if hm.lagRecoveryTimeout <= 0 {
+		return
+	}
+
+	time.AfterFunc(hm.lagRecoveryTimeout, func() {
+		// Check if context is still valid
+		select {
+		case <-hm.ctx.Done():
+			return
+		default:
+		}
+		hm.checkLagForBlock(targetBlock)
+	})
+}
+
+// checkLagForBlock checks all upstreams against a specific target block
+// Marks upstreams as unhealthy if they haven't caught up to the target block
+func (hm *HealthMonitor) checkLagForBlock(targetBlock uint64) {
+	for _, u := range hm.upstreams {
+		currentBlock := u.GetCurrentBlock()
+
+		if targetBlock > currentBlock {
+			lag := targetBlock - currentBlock
+			if lag > hm.blockLagThreshold {
+				if u.IsHealthy() {
+					hm.logger.Warn().
+						Str("upstream", u.Name()).
+						Uint64("currentBlock", currentBlock).
+						Uint64("targetBlock", targetBlock).
+						Uint64("lag", lag).
+						Msg("upstream did not catch up in time, marking unhealthy")
+				}
+				u.SetHealthy(false)
+			}
+		}
+	}
+}
+
+// checkUpstreamCaughtUp checks if an upstream has caught up to the current max block
+// and marks it as healthy if the lag is within threshold
+func (hm *HealthMonitor) checkUpstreamCaughtUp(u *Upstream) {
 	hm.mu.RLock()
 	maxBlock := hm.maxBlock
 	hm.mu.RUnlock()
@@ -443,30 +446,24 @@ func (hm *HealthMonitor) updateHealthStatus(u *Upstream) {
 	currentBlock := u.GetCurrentBlock()
 
 	if maxBlock == 0 || currentBlock == 0 {
-		// Not enough data yet, assume healthy
-		u.SetHealthy(true)
 		return
 	}
 
-	lag := maxBlock - currentBlock
-	healthy := lag <= hm.blockLagThreshold
-
-	if !healthy && u.IsHealthy() {
-		hm.logger.Warn().
-			Str("upstream", u.Name()).
-			Uint64("currentBlock", currentBlock).
-			Uint64("maxBlock", maxBlock).
-			Uint64("lag", lag).
-			Msg("upstream is lagging, marking unhealthy")
-	} else if healthy && !u.IsHealthy() {
-		hm.logger.Info().
-			Str("upstream", u.Name()).
-			Uint64("currentBlock", currentBlock).
-			Uint64("maxBlock", maxBlock).
-			Msg("upstream recovered, marking healthy")
+	var lag uint64
+	if maxBlock > currentBlock {
+		lag = maxBlock - currentBlock
 	}
 
-	u.SetHealthy(healthy)
+	if lag <= hm.blockLagThreshold {
+		if !u.IsHealthy() {
+			hm.logger.Info().
+				Str("upstream", u.Name()).
+				Uint64("currentBlock", currentBlock).
+				Uint64("maxBlock", maxBlock).
+				Msg("upstream caught up, marking healthy")
+		}
+		u.SetHealthy(true)
+	}
 }
 
 // RefreshAllHealth recalculates health for all upstreams
@@ -484,9 +481,9 @@ func (hm *HealthMonitor) RefreshAllHealth() {
 	hm.maxBlock = maxBlock
 	hm.mu.Unlock()
 
-	// Then update health for each upstream
+	// Then check if each upstream has caught up
 	for _, u := range hm.upstreams {
-		hm.updateHealthStatus(u)
+		hm.checkUpstreamCaughtUp(u)
 	}
 }
 

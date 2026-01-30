@@ -215,7 +215,7 @@ to client    /          \
 ### Configuration
 
 This behavior is automatic and requires no configuration. It uses the health monitoring system:
-- `blockTimeout`: If main doesn't receive blocks within this time, it becomes unhealthy
+- `lagRecoveryTimeout`: Time window for lagging upstreams to catch up before being marked unhealthy
 - `blockLagThreshold`: If main lags too far behind, it becomes unhealthy
 
 When all main upstreams are unhealthy, fallback events are forwarded immediately.

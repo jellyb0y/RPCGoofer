@@ -22,7 +22,7 @@ type Config struct {
 	StatusLogInterval         int           `json:"statusLogInterval"`
 	StatsLogInterval          int           `json:"statsLogInterval"`
 	BlockLagThreshold         uint64        `json:"blockLagThreshold"`
-	BlockTimeout              int           `json:"blockTimeout"`
+	LagRecoveryTimeout        int           `json:"lagRecoveryTimeout"`
 	DedupCacheSize            int           `json:"dedupCacheSize"`
 	MaxSubscriptionsPerClient int           `json:"maxSubscriptionsPerClient"`
 	RetryEnabled              bool          `json:"retryEnabled"`
@@ -66,7 +66,7 @@ const (
 	DefaultStatusLogInterval         = 5000     // ms
 	DefaultStatsLogInterval          = 60000    // ms - interval for logging request statistics
 	DefaultBlockLagThreshold         = uint64(0)
-	DefaultBlockTimeout              = 2000 // ms - time without new block before marking unhealthy
+	DefaultLagRecoveryTimeout        = 2000 // ms - time for lagging upstreams to catch up before marking unhealthy
 	DefaultDedupCacheSize            = 10000
 	DefaultMaxSubscriptionsPerClient = 100
 	DefaultRetryEnabled              = true
@@ -95,9 +95,9 @@ func (c *Config) GetStatsLogIntervalDuration() time.Duration {
 	return time.Duration(c.StatsLogInterval) * time.Millisecond
 }
 
-// GetBlockTimeoutDuration returns block timeout as time.Duration
-func (c *Config) GetBlockTimeoutDuration() time.Duration {
-	return time.Duration(c.BlockTimeout) * time.Millisecond
+// GetLagRecoveryTimeoutDuration returns lag recovery timeout as time.Duration
+func (c *Config) GetLagRecoveryTimeoutDuration() time.Duration {
+	return time.Duration(c.LagRecoveryTimeout) * time.Millisecond
 }
 
 // IsCacheEnabled returns true if cache is configured and enabled
