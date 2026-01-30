@@ -299,7 +299,7 @@ func (c *Client) handleSubscribe(ctx context.Context, req *jsonrpc.Request) {
 		return
 	}
 
-	subID, err := c.subManager.Subscribe(ctx, c.conn, c.send, c.pool, subType, params)
+	subID, err := c.subManager.Subscribe(ctx, c.conn, c.send, c.pool, c.groupName, subType, params)
 	if err != nil {
 		c.sendError(req.ID, jsonrpc.NewError(jsonrpc.CodeInternalError, err.Error()))
 		return

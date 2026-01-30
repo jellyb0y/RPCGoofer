@@ -10,11 +10,12 @@ import (
 
 // Pool represents a group of upstreams
 type Pool struct {
-	name      string
-	upstreams []*Upstream
-	monitor   *HealthMonitor
-	logger    zerolog.Logger
-	mu        sync.RWMutex
+	name             string
+	upstreams        []*Upstream
+	monitor          *HealthMonitor
+	newHeadsProvider NewHeadsProvider
+	logger           zerolog.Logger
+	mu               sync.RWMutex
 }
 
 // NewPool creates a new Pool from a group configuration
@@ -238,4 +239,15 @@ func (p *Pool) HasHealthyMain() bool {
 		}
 	}
 	return false
+}
+
+// SetNewHeadsProvider sets the NewHeadsProvider for the health monitor
+func (p *Pool) SetNewHeadsProvider(provider NewHeadsProvider) {
+	p.newHeadsProvider = provider
+	p.monitor.SetNewHeadsProvider(provider)
+}
+
+// GetNewHeadsProvider returns the NewHeadsProvider
+func (p *Pool) GetNewHeadsProvider() NewHeadsProvider {
+	return p.newHeadsProvider
 }

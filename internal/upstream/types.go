@@ -1,12 +1,29 @@
 package upstream
 
 import (
+	"context"
+	"encoding/json"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"rpcgofer/internal/config"
 )
+
+// BlockEventCallback is called when a new block is received from an upstream
+type BlockEventCallback func(upstreamName string, result json.RawMessage)
+
+// NewHeadsSubscriber represents a subscriber for newHeads events
+type NewHeadsSubscriber interface {
+	OnBlock(upstreamName string, result json.RawMessage)
+	ID() string
+}
+
+// NewHeadsProvider provides newHeads subscription functionality
+type NewHeadsProvider interface {
+	SubscribeNewHeads(ctx context.Context, subscriber NewHeadsSubscriber) error
+	UnsubscribeNewHeads(subscriberID string) error
+}
 
 // Role represents the upstream role
 type Role string

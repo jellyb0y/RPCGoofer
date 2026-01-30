@@ -18,19 +18,19 @@ import (
 
 // Server represents the main server
 type Server struct {
-	cfg        *config.Config
-	router     *proxy.Router
-	cache      cache.Cache
-	subManager *subscription.Manager
-	rpcServer  *http.Server
-	wsServer   *http.Server
-	logger     zerolog.Logger
+	cfg              *config.Config
+	router           *proxy.Router
+	cache            cache.Cache
+	subManager       *subscription.Manager
+	sharedSubMgrs    map[string]*subscription.SharedSubscriptionManager // pool name -> shared sub manager
+	rpcServer        *http.Server
+	wsServer         *http.Server
+	logger           zerolog.Logger
 }
 
 // New creates a new Server
 func New(cfg *config.Config, logger zerolog.Logger) (*Server, error) {
 	router := proxy.NewRouter()
-	subManager := subscription.NewManager(cfg, logger)
 
 	// Create cache based on config
 	var rpcCache cache.Cache
@@ -58,23 +58,38 @@ func New(cfg *config.Config, logger zerolog.Logger) (*Server, error) {
 		logger.Info().Msg("cache disabled")
 	}
 
+	sharedSubMgrs := make(map[string]*subscription.SharedSubscriptionManager)
+
+	// Create subscription manager (will receive shared sub managers later)
+	subManager := subscription.NewManager(cfg, sharedSubMgrs, logger)
+
 	return &Server{
-		cfg:        cfg,
-		router:     router,
-		cache:      rpcCache,
-		subManager: subManager,
-		logger:     logger,
+		cfg:           cfg,
+		router:        router,
+		cache:         rpcCache,
+		subManager:    subManager,
+		sharedSubMgrs: sharedSubMgrs,
+		logger:        logger,
 	}, nil
 }
 
 // AddGroup adds an upstream group to the server
 func (s *Server) AddGroup(groupCfg config.GroupConfig) {
 	pool := upstream.NewPool(groupCfg, s.cfg, s.logger)
+
+	// Create SharedSubscriptionManager for this pool
+	sharedSubMgr := subscription.NewSharedSubscriptionManager(pool, s.cfg.DedupCacheSize, s.logger)
+	s.sharedSubMgrs[groupCfg.Name] = sharedSubMgr
+
+	// Set up NewHeadsProvider for health monitoring
+	newHeadsProvider := subscription.NewNewHeadsProviderAdapter(sharedSubMgr)
+	pool.SetNewHeadsProvider(newHeadsProvider)
+
 	s.router.AddPool(pool)
 	s.logger.Info().
 		Str("group", groupCfg.Name).
 		Int("upstreams", len(groupCfg.Upstreams)).
-		Msg("added group")
+		Msg("added group with shared subscription manager")
 }
 
 // Start starts the server
@@ -143,7 +158,7 @@ func (s *Server) Start() error {
 func (s *Server) Stop(ctx context.Context) error {
 	s.logger.Info().Msg("shutting down server...")
 
-	// Close subscription manager
+	// Close subscription manager (client sessions)
 	s.subManager.CloseAll()
 
 	// Shutdown HTTP servers
@@ -156,8 +171,14 @@ func (s *Server) Stop(ctx context.Context) error {
 		wsErr = s.wsServer.Shutdown(ctx)
 	}
 
-	// Stop all pools
+	// Stop all pools (this will unsubscribe health monitors from shared subscriptions)
 	s.router.StopAll()
+
+	// Close all shared subscription managers
+	for name, mgr := range s.sharedSubMgrs {
+		mgr.Close()
+		s.logger.Debug().Str("group", name).Msg("closed shared subscription manager")
+	}
 
 	// Close cache
 	if s.cache != nil {

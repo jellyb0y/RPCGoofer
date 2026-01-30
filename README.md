@@ -8,10 +8,21 @@ High-performance JSON-RPC proxy for Ethereum-compatible blockchain nodes with bu
 - **Automatic Failover**: Seamless switching to fallback nodes when primary nodes fail
 - **Smart Caching**: In-memory LRU cache with TTL for immutable blockchain data
 - **WebSocket Subscriptions**: Full support for `eth_subscribe` with event deduplication
+- **Shared Subscriptions**: Connection multiplexing - only M upstream connections regardless of client count
 - **Health Monitoring**: Real-time block-based health checks with configurable lag threshold
 - **Batch Requests**: Native support for JSON-RPC batch processing
 - **Retry Logic**: Configurable automatic retries with intelligent error classification
 - **Multi-Chain Support**: Configure multiple blockchain networks in a single instance
+
+### Shared Subscriptions
+
+RPCGofer optimizes WebSocket connections through shared subscriptions. Instead of creating N x M connections (N clients x M upstreams), it maintains only M connections per subscription type:
+
+```
+100 clients subscribed to newHeads + 3 upstreams = 3 connections (not 300)
+```
+
+Events are deduplicated at the shared subscription level and fanned out to all subscribers, including both clients and internal components (health monitoring).
 
 ## Quick Start
 

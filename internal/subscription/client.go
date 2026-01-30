@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
 
 	"rpcgofer/internal/jsonrpc"
@@ -24,30 +23,33 @@ const (
 // ClientSession manages subscriptions for a single WebSocket client
 type ClientSession struct {
 	sendFunc      SendFunc
-	subscriptions map[string]*ClientSubscription // subID -> subscription
+	subscriptions map[string]*clientSubscriptionInfo // subID -> subscription info
 	mu            sync.RWMutex
 	maxSubs       int
 	logger        zerolog.Logger
-	dedup         *Deduplicator
 	pool          *upstream.Pool
+	sharedSubMgr  *SharedSubscriptionManager
 	closed        bool
 	closeChan     chan struct{}
 }
 
-// NewClientSession creates a new ClientSession
-func NewClientSession(sendFunc SendFunc, pool *upstream.Pool, maxSubs int, dedupSize int, logger zerolog.Logger) (*ClientSession, error) {
-	dedup, err := NewDeduplicator(dedupSize)
-	if err != nil {
-		return nil, err
-	}
+// clientSubscriptionInfo holds information about a client's subscription
+type clientSubscriptionInfo struct {
+	subID      string
+	subType    SubscriptionType
+	params     json.RawMessage
+	subscriber *clientSubscriber
+}
 
+// NewClientSession creates a new ClientSession
+func NewClientSession(sendFunc SendFunc, pool *upstream.Pool, sharedSubMgr *SharedSubscriptionManager, maxSubs int, dedupSize int, logger zerolog.Logger) (*ClientSession, error) {
 	return &ClientSession{
 		sendFunc:      sendFunc,
-		subscriptions: make(map[string]*ClientSubscription),
+		subscriptions: make(map[string]*clientSubscriptionInfo),
 		maxSubs:       maxSubs,
 		logger:        logger,
-		dedup:         dedup,
 		pool:          pool,
+		sharedSubMgr:  sharedSubMgr,
 		closeChan:     make(chan struct{}),
 	}, nil
 }
@@ -69,231 +71,197 @@ func (cs *ClientSession) Subscribe(ctx context.Context, subType SubscriptionType
 	// Generate subscription ID
 	subID := generateSubID()
 
-	// Create client subscription
-	clientSub := NewClientSubscription(subID, subType, params)
-
-	// Subscribe to all healthy upstreams with WebSocket
-	upstreams := cs.pool.GetHealthyWithWS()
-	if len(upstreams) == 0 {
-		return "", fmt.Errorf("no healthy upstreams with WebSocket available")
+	// Create subscriber for this subscription
+	subscriber := &clientSubscriber{
+		id:        subID,
+		subType:   subType,
+		params:    params,
+		session:   cs,
+		sendChan:  make(chan []byte, 100),
+		closeChan: make(chan struct{}),
 	}
+
+	// Check if we have SharedSubscriptionManager
+	if cs.sharedSubMgr != nil {
+		// Subscribe through SharedSubscriptionManager
+		if err := cs.sharedSubMgr.Subscribe(ctx, subType, params, subscriber); err != nil {
+			return "", fmt.Errorf("failed to subscribe: %w", err)
+		}
+	} else {
+		return "", fmt.Errorf("no shared subscription manager available")
+	}
+
+	// Store subscription info
+	cs.mu.Lock()
+	cs.subscriptions[subID] = &clientSubscriptionInfo{
+		subID:      subID,
+		subType:    subType,
+		params:     params,
+		subscriber: subscriber,
+	}
+	cs.mu.Unlock()
+
+	// Start sender goroutine
+	go cs.sendToClient(subscriber)
 
 	cs.logger.Debug().
 		Str("subID", subID).
 		Str("type", string(subType)).
-		Int("upstreams", len(upstreams)).
-		Msg("creating subscription")
-
-	// Create subscriptions on all upstreams
-	for _, u := range upstreams {
-		upSub, err := cs.subscribeToUpstream(ctx, u, subType, params)
-		if err != nil {
-			cs.logger.Warn().
-				Err(err).
-				Str("upstream", u.Name()).
-				Str("subID", subID).
-				Msg("failed to subscribe to upstream")
-			continue
-		}
-		clientSub.AddUpstreamSub(u.Name(), upSub)
-
-		// Start reading events from this upstream
-		go cs.readUpstreamEvents(clientSub, u.Name(), upSub)
-	}
-
-	if len(clientSub.GetUpstreamSubs()) == 0 {
-		return "", fmt.Errorf("failed to subscribe to any upstream")
-	}
-
-	// Store subscription
-	cs.mu.Lock()
-	cs.subscriptions[subID] = clientSub
-	cs.mu.Unlock()
-
-	// Start sender goroutine
-	go cs.sendToClient(clientSub)
+		Msg("subscription created via shared subscription manager")
 
 	return subID, nil
 }
 
-// subscribeToUpstream creates a subscription on a single upstream
-func (cs *ClientSession) subscribeToUpstream(ctx context.Context, u *upstream.Upstream, subType SubscriptionType, params json.RawMessage) (*UpstreamSubscription, error) {
-	if !u.HasWS() {
-		return nil, fmt.Errorf("upstream has no WebSocket URL")
+// Unsubscribe removes a subscription
+func (cs *ClientSession) Unsubscribe(subID string) error {
+	cs.mu.Lock()
+	subInfo, ok := cs.subscriptions[subID]
+	if !ok {
+		cs.mu.Unlock()
+		return fmt.Errorf("subscription not found: %s", subID)
 	}
+	delete(cs.subscriptions, subID)
+	cs.mu.Unlock()
 
-	// Connect to upstream WebSocket
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-	}
+	// Close the subscriber
+	subInfo.subscriber.Close()
 
-	conn, _, err := dialer.DialContext(ctx, u.WSURL(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect: %w", err)
-	}
-
-	// Build subscription request
-	var subParams []interface{}
-	subParams = append(subParams, string(subType))
-	if params != nil && len(params) > 0 {
-		var additionalParams interface{}
-		if err := json.Unmarshal(params, &additionalParams); err == nil {
-			subParams = append(subParams, additionalParams)
+	// Unsubscribe from SharedSubscriptionManager
+	if cs.sharedSubMgr != nil {
+		if err := cs.sharedSubMgr.Unsubscribe(subInfo.subType, subInfo.params, subID); err != nil {
+			cs.logger.Warn().Err(err).Str("subID", subID).Msg("failed to unsubscribe from shared subscription")
 		}
 	}
 
-	req, err := jsonrpc.NewRequest("eth_subscribe", subParams, jsonrpc.NewIDInt(1))
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	reqBytes, err := req.Bytes()
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	if err := conn.WriteMessage(websocket.TextMessage, reqBytes); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-
-	// Read response
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	_, respData, err := conn.ReadMessage()
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-	conn.SetReadDeadline(time.Time{}) // Clear deadline
-
-	var resp jsonrpc.Response
-	if err := json.Unmarshal(respData, &resp); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if resp.HasError() {
-		conn.Close()
-		return nil, fmt.Errorf("subscription error: %s", resp.Error.Message)
-	}
-
-	// Extract subscription ID
-	var upstreamSubID string
-	if err := json.Unmarshal(resp.Result, &upstreamSubID); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to parse subscription ID: %w", err)
-	}
-
-	return &UpstreamSubscription{
-		ID:        upstreamSubID,
-		Upstream:  u,
-		Conn:      conn,
-		closeChan: make(chan struct{}),
-	}, nil
+	cs.logger.Debug().Str("subID", subID).Msg("subscription removed")
+	return nil
 }
 
-// readUpstreamEvents reads events from an upstream subscription
-func (cs *ClientSession) readUpstreamEvents(clientSub *ClientSubscription, upstreamName string, upSub *UpstreamSubscription) {
-	defer func() {
-		upSub.Conn.Close()
-		clientSub.RemoveUpstreamSub(upstreamName)
-	}()
+// Close closes the session and all subscriptions
+func (cs *ClientSession) Close() {
+	cs.mu.Lock()
+	if cs.closed {
+		cs.mu.Unlock()
+		return
+	}
+	cs.closed = true
+	close(cs.closeChan)
 
-	isMainUpstream := upSub.Upstream.IsMain()
+	subs := make([]*clientSubscriptionInfo, 0, len(cs.subscriptions))
+	for _, sub := range cs.subscriptions {
+		subs = append(subs, sub)
+	}
+	cs.subscriptions = make(map[string]*clientSubscriptionInfo)
+	cs.mu.Unlock()
 
+	// Close all subscriptions and unsubscribe from SharedSubscriptionManager
+	for _, sub := range subs {
+		sub.subscriber.Close()
+		if cs.sharedSubMgr != nil {
+			cs.sharedSubMgr.Unsubscribe(sub.subType, sub.params, sub.subID)
+		}
+	}
+
+	cs.logger.Debug().Msg("client session closed")
+}
+
+// GetSubscriptionCount returns the number of active subscriptions
+func (cs *ClientSession) GetSubscriptionCount() int {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return len(cs.subscriptions)
+}
+
+// sendToClient sends messages from the subscription to the client
+func (cs *ClientSession) sendToClient(subscriber *clientSubscriber) {
 	for {
 		select {
-		case <-clientSub.CloseChan():
-			return
-		case <-upSub.closeChan:
+		case data := <-subscriber.sendChan:
+			cs.sendFunc(data)
+		case <-subscriber.closeChan:
 			return
 		case <-cs.closeChan:
 			return
-		default:
 		}
+	}
+}
 
-		upSub.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		_, data, err := upSub.Conn.ReadMessage()
-		if err != nil {
-			cs.logger.Debug().
-				Err(err).
-				Str("upstream", upstreamName).
-				Str("subID", clientSub.ID).
-				Msg("upstream read error")
-			return
-		}
+// clientSubscriber implements Subscriber interface for a client subscription
+type clientSubscriber struct {
+	id        string
+	subType   SubscriptionType
+	params    json.RawMessage
+	session   *ClientSession
+	sendChan  chan []byte
+	closeChan chan struct{}
+	closed    bool
+	mu        sync.Mutex
+}
 
-		// Parse notification
-		var notification SubscriptionNotification
-		if err := json.Unmarshal(data, &notification); err != nil {
-			continue // Not a notification
-		}
+// ID implements Subscriber interface
+func (s *clientSubscriber) ID() string {
+	return s.id
+}
 
-		if notification.Method != "eth_subscription" {
-			continue
-		}
+// OnEvent implements Subscriber interface
+func (s *clientSubscriber) OnEvent(event SubscriptionEvent) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
 
-		// Check for duplicates
-		if cs.dedup.IsDuplicate(clientSub.Type, notification.Params.Result) {
-			cs.logger.Debug().
-				Str("upstream", upstreamName).
-				Str("subID", clientSub.ID).
-				Msg("duplicate event, skipping")
-			continue
-		}
-
-		// For newHeads from fallback upstream, wait until main has the block
-		// This prevents sending block notifications before main upstreams have the block,
-		// which would cause RPC requests (routed to main) to fail with "block not found"
-		if clientSub.Type == SubTypeNewHeads && !isMainUpstream {
-			blockNum, err := parseBlockNumber(notification.Params.Result)
+	// For newHeads from fallback upstreams, wait until main has the block
+	// This prevents sending block notifications before main upstreams have the block,
+	// which would cause RPC requests (routed to main) to fail with "block not found"
+	if event.SubType == SubTypeNewHeads {
+		// Check if this is from a fallback upstream
+		u := s.session.pool.GetByName(event.UpstreamName)
+		if u != nil && u.IsFallback() {
+			blockNum, err := parseBlockNumber(event.Result)
 			if err != nil {
-				cs.logger.Warn().Err(err).Msg("failed to parse block number from newHeads")
+				s.session.logger.Warn().Err(err).Msg("failed to parse block number from newHeads")
 			} else {
-				// Wait for main to have the block, or for main to become unhealthy
-				if !cs.waitForMainBlock(blockNum, clientSub.CloseChan()) {
-					// Session is closing
+				// Wait for main to have the block
+				if !s.waitForMainBlock(blockNum) {
+					// Session or subscriber is closing
 					return
 				}
 			}
 		}
+	}
 
-		// Create client notification with client's subscription ID
-		clientNotification := NewNotification(clientSub.ID, notification.Params.Result)
-		notifBytes, err := clientNotification.Bytes()
-		if err != nil {
-			cs.logger.Warn().Err(err).Msg("failed to marshal notification")
-			continue
-		}
+	// Create client notification with client's subscription ID
+	clientNotification := NewNotification(s.id, event.Result)
+	notifBytes, err := clientNotification.Bytes()
+	if err != nil {
+		s.session.logger.Warn().Err(err).Msg("failed to marshal notification")
+		return
+	}
 
-		// Send to client
-		clientSub.Send(notifBytes)
-
-		cs.logger.Debug().
-			Str("upstream", upstreamName).
-			Str("subID", clientSub.ID).
-			Str("type", string(clientSub.Type)).
-			Bool("isMain", isMainUpstream).
-			Msg("forwarded event to client")
+	// Send to client via channel
+	select {
+	case s.sendChan <- notifBytes:
+	case <-s.closeChan:
+	case <-s.session.closeChan:
+	default:
+		// Channel full, drop message
+		s.session.logger.Warn().Str("subID", s.id).Msg("send channel full, dropping event")
 	}
 }
 
 // waitForMainBlock waits until at least one main upstream has the specified block
-// Returns true if the block should be sent to client, false on session close
-// Logic:
-// - If main has the block -> send immediately
-// - If no healthy main upstreams -> send immediately (fallback is our only source)
-// - If main is healthy but doesn't have block yet -> wait
-func (cs *ClientSession) waitForMainBlock(blockNum uint64, closeChan <-chan struct{}) bool {
+func (s *clientSubscriber) waitForMainBlock(blockNum uint64) bool {
+	pool := s.session.pool
+
 	// Check immediately - main has the block
-	if cs.pool.GetMainMaxBlock() >= blockNum {
+	if pool.GetMainMaxBlock() >= blockNum {
 		return true
 	}
 
 	// If no healthy main upstreams, allow fallback blocks through
-	if !cs.pool.HasHealthyMain() {
+	if !pool.HasHealthyMain() {
 		return true
 	}
 
@@ -302,22 +270,33 @@ func (cs *ClientSession) waitForMainBlock(blockNum uint64, closeChan <-chan stru
 
 	for {
 		select {
-		case <-closeChan:
+		case <-s.closeChan:
 			return false
-		case <-cs.closeChan:
+		case <-s.session.closeChan:
 			return false
 		case <-ticker.C:
 			// Main has the block now
-			if cs.pool.GetMainMaxBlock() >= blockNum {
+			if pool.GetMainMaxBlock() >= blockNum {
 				return true
 			}
 			// All main upstreams became unhealthy - allow fallback blocks
-			if !cs.pool.HasHealthyMain() {
+			if !pool.HasHealthyMain() {
 				return true
 			}
 			// Main is still healthy but doesn't have block - keep waiting
 		}
 	}
+}
+
+// Close closes the subscriber
+func (s *clientSubscriber) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
+	close(s.closeChan)
 }
 
 // parseBlockNumber extracts block number from newHeads result
@@ -333,97 +312,6 @@ func parseBlockNumber(result json.RawMessage) (uint64, error) {
 func parseHexUint64(hex string) (uint64, error) {
 	hex = strings.TrimPrefix(hex, "0x")
 	return strconv.ParseUint(hex, 16, 64)
-}
-
-// sendToClient sends messages from the subscription to the client
-func (cs *ClientSession) sendToClient(clientSub *ClientSubscription) {
-	for {
-		select {
-		case data := <-clientSub.SendChan():
-			cs.sendFunc(data)
-		case <-clientSub.CloseChan():
-			return
-		case <-cs.closeChan:
-			return
-		}
-	}
-}
-
-// Unsubscribe removes a subscription
-func (cs *ClientSession) Unsubscribe(subID string) error {
-	cs.mu.Lock()
-	clientSub, ok := cs.subscriptions[subID]
-	if !ok {
-		cs.mu.Unlock()
-		return fmt.Errorf("subscription not found: %s", subID)
-	}
-	delete(cs.subscriptions, subID)
-	cs.mu.Unlock()
-
-	// Close the subscription
-	clientSub.Close()
-
-	// Unsubscribe from all upstreams
-	for upstreamName, upSub := range clientSub.GetUpstreamSubs() {
-		cs.unsubscribeFromUpstream(upSub)
-		cs.logger.Debug().
-			Str("upstream", upstreamName).
-			Str("subID", subID).
-			Msg("unsubscribed from upstream")
-	}
-
-	cs.logger.Debug().Str("subID", subID).Msg("subscription removed")
-	return nil
-}
-
-// unsubscribeFromUpstream sends unsubscribe request to upstream
-func (cs *ClientSession) unsubscribeFromUpstream(upSub *UpstreamSubscription) {
-	close(upSub.closeChan)
-
-	// Try to send unsubscribe request
-	req, err := jsonrpc.NewRequest("eth_unsubscribe", []string{upSub.ID}, jsonrpc.NewIDInt(1))
-	if err != nil {
-		return
-	}
-
-	reqBytes, _ := req.Bytes()
-	upSub.Conn.WriteMessage(websocket.TextMessage, reqBytes)
-	upSub.Conn.Close()
-}
-
-// Close closes the session and all subscriptions
-func (cs *ClientSession) Close() {
-	cs.mu.Lock()
-	if cs.closed {
-		cs.mu.Unlock()
-		return
-	}
-	cs.closed = true
-	close(cs.closeChan)
-
-	subs := make([]*ClientSubscription, 0, len(cs.subscriptions))
-	for _, sub := range cs.subscriptions {
-		subs = append(subs, sub)
-	}
-	cs.subscriptions = make(map[string]*ClientSubscription)
-	cs.mu.Unlock()
-
-	// Close all subscriptions
-	for _, sub := range subs {
-		sub.Close()
-		for _, upSub := range sub.GetUpstreamSubs() {
-			cs.unsubscribeFromUpstream(upSub)
-		}
-	}
-
-	cs.logger.Debug().Msg("client session closed")
-}
-
-// GetSubscriptionCount returns the number of active subscriptions
-func (cs *ClientSession) GetSubscriptionCount() int {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return len(cs.subscriptions)
 }
 
 // generateSubID generates a unique subscription ID

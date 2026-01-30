@@ -15,20 +15,22 @@ import (
 
 // Manager manages all subscription sessions
 type Manager struct {
-	sessions    map[uintptr]*ClientSession
-	mu          sync.RWMutex
-	maxSubs     int
-	dedupSize   int
-	logger      zerolog.Logger
+	sessions      map[uintptr]*ClientSession
+	sharedSubMgrs map[string]*SharedSubscriptionManager // pool name -> shared sub manager
+	mu            sync.RWMutex
+	maxSubs       int
+	dedupSize     int
+	logger        zerolog.Logger
 }
 
 // NewManager creates a new subscription Manager
-func NewManager(cfg *config.Config, logger zerolog.Logger) *Manager {
+func NewManager(cfg *config.Config, sharedSubMgrs map[string]*SharedSubscriptionManager, logger zerolog.Logger) *Manager {
 	return &Manager{
-		sessions:  make(map[uintptr]*ClientSession),
-		maxSubs:   cfg.MaxSubscriptionsPerClient,
-		dedupSize: cfg.DedupCacheSize,
-		logger:    logger.With().Str("component", "subscription").Logger(),
+		sessions:      make(map[uintptr]*ClientSession),
+		sharedSubMgrs: sharedSubMgrs,
+		maxSubs:       cfg.MaxSubscriptionsPerClient,
+		dedupSize:     cfg.DedupCacheSize,
+		logger:        logger.With().Str("component", "subscription").Logger(),
 	}
 }
 
@@ -38,7 +40,7 @@ func connKey(conn *websocket.Conn) uintptr {
 }
 
 // GetOrCreateSession gets or creates a session for the given connection
-func (m *Manager) GetOrCreateSession(conn *websocket.Conn, sendFunc SendFunc, pool *upstream.Pool) (*ClientSession, error) {
+func (m *Manager) GetOrCreateSession(conn *websocket.Conn, sendFunc SendFunc, pool *upstream.Pool, groupName string) (*ClientSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -47,13 +49,16 @@ func (m *Manager) GetOrCreateSession(conn *websocket.Conn, sendFunc SendFunc, po
 		return session, nil
 	}
 
-	session, err := NewClientSession(sendFunc, pool, m.maxSubs, m.dedupSize, m.logger)
+	// Get the SharedSubscriptionManager for this pool
+	sharedSubMgr := m.sharedSubMgrs[groupName]
+
+	session, err := NewClientSession(sendFunc, pool, sharedSubMgr, m.maxSubs, m.dedupSize, m.logger)
 	if err != nil {
 		return nil, err
 	}
 
 	m.sessions[key] = session
-	m.logger.Debug().Msg("created new client session")
+	m.logger.Debug().Str("group", groupName).Msg("created new client session")
 	return session, nil
 }
 
@@ -81,8 +86,8 @@ func (m *Manager) RemoveSession(conn *websocket.Conn) {
 }
 
 // Subscribe creates a subscription for a client
-func (m *Manager) Subscribe(ctx context.Context, conn *websocket.Conn, sendFunc SendFunc, pool *upstream.Pool, subType string, params json.RawMessage) (string, error) {
-	session, err := m.GetOrCreateSession(conn, sendFunc, pool)
+func (m *Manager) Subscribe(ctx context.Context, conn *websocket.Conn, sendFunc SendFunc, pool *upstream.Pool, groupName string, subType string, params json.RawMessage) (string, error) {
+	session, err := m.GetOrCreateSession(conn, sendFunc, pool, groupName)
 	if err != nil {
 		return "", err
 	}
