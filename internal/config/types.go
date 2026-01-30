@@ -23,6 +23,8 @@ type Config struct {
 	StatsLogInterval          int           `json:"statsLogInterval"`
 	BlockLagThreshold         uint64        `json:"blockLagThreshold"`
 	LagRecoveryTimeout        int           `json:"lagRecoveryTimeout"`
+	UpstreamMessageTimeout    int           `json:"upstreamMessageTimeout"`    // ms - timeout for receiving messages from upstream WebSocket
+	UpstreamReconnectInterval int           `json:"upstreamReconnectInterval"` // ms - interval between reconnection attempts
 	DedupCacheSize            int           `json:"dedupCacheSize"`
 	MaxSubscriptionsPerClient int           `json:"maxSubscriptionsPerClient"`
 	RetryEnabled              bool          `json:"retryEnabled"`
@@ -66,7 +68,9 @@ const (
 	DefaultStatusLogInterval         = 5000     // ms
 	DefaultStatsLogInterval          = 60000    // ms - interval for logging request statistics
 	DefaultBlockLagThreshold         = uint64(0)
-	DefaultLagRecoveryTimeout        = 2000 // ms - time for lagging upstreams to catch up before marking unhealthy
+	DefaultLagRecoveryTimeout        = 2000  // ms - time for lagging upstreams to catch up before marking unhealthy
+	DefaultUpstreamMessageTimeout    = 60000 // ms - timeout for receiving messages from upstream WebSocket (60s)
+	DefaultUpstreamReconnectInterval = 5000  // ms - interval between reconnection attempts (5s)
 	DefaultDedupCacheSize            = 10000
 	DefaultMaxSubscriptionsPerClient = 100
 	DefaultRetryEnabled              = true
@@ -98,6 +102,16 @@ func (c *Config) GetStatsLogIntervalDuration() time.Duration {
 // GetLagRecoveryTimeoutDuration returns lag recovery timeout as time.Duration
 func (c *Config) GetLagRecoveryTimeoutDuration() time.Duration {
 	return time.Duration(c.LagRecoveryTimeout) * time.Millisecond
+}
+
+// GetUpstreamMessageTimeoutDuration returns upstream message timeout as time.Duration
+func (c *Config) GetUpstreamMessageTimeoutDuration() time.Duration {
+	return time.Duration(c.UpstreamMessageTimeout) * time.Millisecond
+}
+
+// GetUpstreamReconnectIntervalDuration returns upstream reconnect interval as time.Duration
+func (c *Config) GetUpstreamReconnectIntervalDuration() time.Duration {
+	return time.Duration(c.UpstreamReconnectInterval) * time.Millisecond
 }
 
 // IsCacheEnabled returns true if cache is configured and enabled

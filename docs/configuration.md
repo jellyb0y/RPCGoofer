@@ -17,6 +17,8 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
   "statsLogInterval": 60000,
   "blockLagThreshold": 0,
   "lagRecoveryTimeout": 2000,
+  "upstreamMessageTimeout": 60000,
+  "upstreamReconnectInterval": 5000,
   "dedupCacheSize": 10000,
   "maxSubscriptionsPerClient": 100,
   "retryEnabled": true,
@@ -79,6 +81,15 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
 | `dedupCacheSize` | int | `10000` | Size of deduplication cache for subscription events |
 | `maxSubscriptionsPerClient` | int | `100` | Maximum subscriptions per WebSocket client |
 
+## Upstream WebSocket Settings
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `upstreamMessageTimeout` | int | `60000` | Timeout in milliseconds for receiving messages from upstream WebSocket. If no message is received within this period, the connection is considered broken and reconnection is attempted |
+| `upstreamReconnectInterval` | int | `5000` | Interval in milliseconds between reconnection attempts to upstream WebSocket |
+
+These settings control automatic reconnection behavior for upstream WebSocket connections used by subscriptions. When an upstream WebSocket connection drops or times out, RPCGofer will automatically attempt to reconnect.
+
 ## Cache Configuration
 
 | Parameter | Type | Default | Description |
@@ -139,6 +150,8 @@ At least one of `rpcUrl` or `wsUrl` is required per upstream.
   "logLevel": "info",
   "blockLagThreshold": 3,
   "lagRecoveryTimeout": 2000,
+  "upstreamMessageTimeout": 60000,
+  "upstreamReconnectInterval": 5000,
   "statsLogInterval": 60000,
   "retryEnabled": true,
   "retryMaxAttempts": 3,

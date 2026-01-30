@@ -165,6 +165,53 @@ RPCGofer subscribes to multiple upstreams simultaneously for increased reliabili
 - **Lower latency**: First event from any upstream is delivered
 - **Automatic failover**: Continues working if upstreams disconnect
 
+## Automatic Reconnection
+
+RPCGofer automatically reconnects to upstream WebSocket connections when they drop or timeout.
+
+### How It Works
+
+```
+1. Upstream WebSocket connection drops or times out
+2. RPCGofer waits for reconnectInterval (default: 5 seconds)
+3. Attempts to reconnect and resubscribe
+4. If successful: resumes receiving events
+5. If failed: waits and retries indefinitely
+```
+
+### Message Timeout Detection
+
+If no message is received from an upstream within `upstreamMessageTimeout` (default: 60 seconds), the connection is considered stale and reconnection is triggered. This handles cases where:
+- The upstream silently disconnects
+- Network issues prevent messages from arriving
+- The upstream stops sending events without closing the connection
+
+### Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `upstreamMessageTimeout` | 60000 ms | Timeout for receiving messages from upstream |
+| `upstreamReconnectInterval` | 5000 ms | Interval between reconnection attempts |
+
+### Example Configuration
+
+```json
+{
+  "upstreamMessageTimeout": 60000,
+  "upstreamReconnectInterval": 5000
+}
+```
+
+### Logging
+
+Reconnection events are logged:
+
+```
+INF waiting before reconnection attempt upstream=infura interval=5s
+WRN upstream read error, will attempt reconnection upstream=infura error="..."
+INF successfully reconnected to upstream upstream=infura
+```
+
 ## Shared Subscriptions (Connection Multiplexing)
 
 RPCGofer uses shared subscriptions to optimize WebSocket connections to upstreams. Instead of creating separate connections for each client, connections are shared among all clients with the same subscription type.
