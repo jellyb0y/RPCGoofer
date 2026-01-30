@@ -30,8 +30,10 @@ func NewPool(groupCfg config.GroupConfig, globalCfg *config.Config, logger zerol
 	monitor := NewHealthMonitor(
 		upstreams,
 		globalCfg.BlockLagThreshold,
+		globalCfg.GetBlockTimeoutDuration(),
 		globalCfg.GetHealthCheckIntervalDuration(),
 		globalCfg.GetStatusLogIntervalDuration(),
+		globalCfg.GetStatsLogIntervalDuration(),
 		poolLogger,
 	)
 
@@ -206,4 +208,34 @@ func (p *Pool) GetHealthyWithWS() []*Upstream {
 		}
 	}
 	return result
+}
+
+// GetMainMaxBlock returns the maximum block number among healthy main upstreams
+func (p *Pool) GetMainMaxBlock() uint64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	var maxBlock uint64
+	for _, u := range p.upstreams {
+		if u.IsMain() && u.IsHealthy() {
+			block := u.GetCurrentBlock()
+			if block > maxBlock {
+				maxBlock = block
+			}
+		}
+	}
+	return maxBlock
+}
+
+// HasHealthyMain returns true if at least one main upstream is healthy
+func (p *Pool) HasHealthyMain() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	for _, u := range p.upstreams {
+		if u.IsMain() && u.IsHealthy() {
+			return true
+		}
+	}
+	return false
 }

@@ -19,8 +19,10 @@ import (
 type HealthMonitor struct {
 	upstreams         []*Upstream
 	blockLagThreshold uint64
+	blockTimeout      time.Duration
 	checkInterval     time.Duration
 	statusLogInterval time.Duration
+	statsLogInterval  time.Duration
 	logger            zerolog.Logger
 
 	ctx    context.Context
@@ -32,14 +34,16 @@ type HealthMonitor struct {
 }
 
 // NewHealthMonitor creates a new HealthMonitor
-func NewHealthMonitor(upstreams []*Upstream, blockLagThreshold uint64, checkInterval time.Duration, statusLogInterval time.Duration, logger zerolog.Logger) *HealthMonitor {
+func NewHealthMonitor(upstreams []*Upstream, blockLagThreshold uint64, blockTimeout time.Duration, checkInterval time.Duration, statusLogInterval time.Duration, statsLogInterval time.Duration, logger zerolog.Logger) *HealthMonitor {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &HealthMonitor{
 		upstreams:         upstreams,
 		blockLagThreshold: blockLagThreshold,
+		blockTimeout:      blockTimeout,
 		checkInterval:     checkInterval,
 		statusLogInterval: statusLogInterval,
+		statsLogInterval:  statsLogInterval,
 		logger:            logger,
 		ctx:               ctx,
 		cancel:            cancel,
@@ -62,6 +66,67 @@ func (hm *HealthMonitor) Start() {
 	if hm.statusLogInterval > 0 {
 		hm.wg.Add(1)
 		go hm.logStatus()
+	}
+
+	// Start block timeout checker
+	if hm.blockTimeout > 0 {
+		hm.wg.Add(1)
+		go hm.checkBlockTimeouts()
+	}
+
+	// Start request statistics logging goroutine
+	if hm.statsLogInterval > 0 {
+		hm.wg.Add(1)
+		go hm.logRequestStats()
+	}
+}
+
+// checkBlockTimeouts periodically checks if upstreams have timed out
+func (hm *HealthMonitor) checkBlockTimeouts() {
+	defer hm.wg.Done()
+
+	// Check more frequently than the timeout itself
+	checkInterval := hm.blockTimeout / 4
+	if checkInterval < 500*time.Millisecond {
+		checkInterval = 500 * time.Millisecond
+	}
+
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-hm.ctx.Done():
+			return
+		case <-ticker.C:
+			hm.checkAllTimeouts()
+		}
+	}
+}
+
+// checkAllTimeouts checks all upstreams for block timeout
+func (hm *HealthMonitor) checkAllTimeouts() {
+	now := time.Now()
+
+	for _, u := range hm.upstreams {
+		lastBlockTime := u.GetLastBlockTime()
+
+		// Skip if no block received yet
+		if lastBlockTime.IsZero() {
+			continue
+		}
+
+		timeSinceBlock := now.Sub(lastBlockTime)
+		if timeSinceBlock > hm.blockTimeout {
+			if u.IsHealthy() {
+				hm.logger.Warn().
+					Str("upstream", u.Name()).
+					Dur("timeSinceBlock", timeSinceBlock).
+					Dur("timeout", hm.blockTimeout).
+					Msg("upstream block timeout, marking unhealthy")
+				u.SetHealthy(false)
+			}
+		}
 	}
 }
 
@@ -119,6 +184,46 @@ func (hm *HealthMonitor) logCurrentStatus() {
 		Strs("healthyFallback", healthyFallback).
 		Strs("unhealthyFallback", unhealthyFallback).
 		Msg("upstreams status")
+}
+
+// logRequestStats periodically logs the request statistics of all upstreams
+func (hm *HealthMonitor) logRequestStats() {
+	defer hm.wg.Done()
+
+	ticker := time.NewTicker(hm.statsLogInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-hm.ctx.Done():
+			return
+		case <-ticker.C:
+			hm.logCurrentRequestStats()
+		}
+	}
+}
+
+// logCurrentRequestStats logs the current request statistics and resets counters
+func (hm *HealthMonitor) logCurrentRequestStats() {
+	var totalRequests uint64
+	requestStats := make(map[string]uint64)
+
+	for _, u := range hm.upstreams {
+		count := u.SwapRequestCount()
+		requestStats[u.Name()] = count
+		totalRequests += count
+	}
+
+	// Build log event with stats for each upstream
+	logEvent := hm.logger.Info().
+		Uint64("totalRequests", totalRequests).
+		Dur("interval", hm.statsLogInterval)
+
+	for _, u := range hm.upstreams {
+		logEvent = logEvent.Uint64(u.Name(), requestStats[u.Name()])
+	}
+
+	logEvent.Msg("request statistics")
 }
 
 // Stop stops health monitoring

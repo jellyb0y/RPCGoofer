@@ -147,6 +147,26 @@ func (u *Upstream) UpdateBlock(block uint64) bool {
 	return u.status.UpdateBlock(block)
 }
 
+// IncrementRequestCount increments the request counter
+func (u *Upstream) IncrementRequestCount() {
+	u.status.IncrementRequestCount()
+}
+
+// IncrementRequestCountBy increments the request counter by a given value
+func (u *Upstream) IncrementRequestCountBy(count uint64) {
+	u.status.IncrementRequestCountBy(count)
+}
+
+// SwapRequestCount returns the current request count and resets it to zero
+func (u *Upstream) SwapRequestCount() uint64 {
+	return u.status.SwapRequestCount()
+}
+
+// GetLastBlockTime returns the time of the last block update
+func (u *Upstream) GetLastBlockTime() time.Time {
+	return u.status.GetLastBlockTime()
+}
+
 // HasRPC returns true if HTTP RPC URL is configured
 func (u *Upstream) HasRPC() bool {
 	return u.rpcURL != ""
@@ -193,6 +213,9 @@ func (u *Upstream) ExecuteHTTP(ctx context.Context, req *jsonrpc.Request) (*json
 	}
 	defer resp.Body.Close()
 
+	// Increment request counter after successful HTTP call
+	u.IncrementRequestCount()
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
@@ -234,6 +257,9 @@ func (u *Upstream) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Increment request counter by number of requests in batch
+	u.IncrementRequestCountBy(uint64(len(requests)))
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -287,6 +313,9 @@ func (u *Upstream) ExecuteWS(ctx context.Context, req *jsonrpc.Request) (*jsonrp
 		u.wsMu.Unlock()
 		return nil, fmt.Errorf("failed to send WS request: %w", err)
 	}
+
+	// Increment request counter after successful WS send
+	u.IncrementRequestCount()
 
 	// Wait for response with context
 	select {

@@ -167,6 +167,71 @@ RPCGofer subscribes to multiple upstreams simultaneously for increased reliabili
 - **Lower latency**: First event from any upstream is delivered
 - **Automatic failover**: Continues working if upstreams disconnect
 
+## Main/Fallback Synchronization for newHeads
+
+When using both main and fallback upstreams, RPCGofer ensures that `newHeads` events are only sent to clients when the block is available on main upstreams.
+
+### The Problem
+
+Without synchronization:
+1. Fallback upstream receives block #1000 first
+2. Client receives newHeads notification for block #1000
+3. Client makes RPC request (e.g., `debug_traceBlockByNumber`) for block #1000
+4. RPC request goes to main upstream (which doesn't have block #1000 yet)
+5. Request fails with "block not found"
+
+### The Solution
+
+For `newHeads` events from fallback upstreams:
+
+```
+1. Fallback receives new block
+2. Check if any healthy main upstream has this block
+3. If yes: forward event to client immediately
+4. If no: wait for main to receive the block
+5. If all main upstreams become unhealthy: forward event (fallback is only source)
+```
+
+### Flow Diagram
+
+```
+Fallback receives block #1000
+         |
+         v
+   Main has block?
+    /          \
+  Yes           No
+   |             |
+   v             v
+Forward      Main healthy?
+to client    /          \
+           Yes           No
+            |             |
+            v             v
+         Wait for     Forward
+         main block   to client
+```
+
+### Configuration
+
+This behavior is automatic and requires no configuration. It uses the health monitoring system:
+- `blockTimeout`: If main doesn't receive blocks within this time, it becomes unhealthy
+- `blockLagThreshold`: If main lags too far behind, it becomes unhealthy
+
+When all main upstreams are unhealthy, fallback events are forwarded immediately.
+
+### Logging
+
+Events from main upstreams:
+```
+DEBUG forwarded event to client upstream=main-node subID=0x123 type=newHeads isMain=true
+```
+
+Events from fallback upstreams (after waiting for main):
+```
+DEBUG forwarded event to client upstream=fallback-node subID=0x123 type=newHeads isMain=false
+```
+
 ## Event Deduplication
 
 Since events are received from multiple upstreams, deduplication prevents duplicate events reaching the client.

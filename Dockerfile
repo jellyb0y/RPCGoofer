@@ -1,4 +1,7 @@
-FROM golang:1.22-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
+
+ARG TARGETARCH
+ARG TARGETOS=linux
 
 WORKDIR /app
 
@@ -9,9 +12,9 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /rpcgofer ./cmd/rpcgofer
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /rpcgofer ./cmd/rpcgofer
 
-FROM alpine:3.19
+FROM --platform=$TARGETPLATFORM alpine:3.19
 
 RUN apk --no-cache add ca-certificates tzdata
 

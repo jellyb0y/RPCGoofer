@@ -5,6 +5,7 @@
   "logLevel": "info",
   "blockLagThreshold": 0,
   "statusLogInterval": 5000,
+  "statsLogInterval": 60000,
   "retryEnabled": true,
   "retryMaxAttempts": 3,
   "cache": {

@@ -84,7 +84,53 @@ With `blockLagThreshold: 3`:
 
 ### Threshold Value of 0
 
-Setting `blockLagThreshold: 0` effectively disables lag-based health checks. Upstreams are only marked unhealthy if they fail to respond.
+Setting `blockLagThreshold: 0` effectively disables lag-based health checks. Upstreams are only marked unhealthy if they fail to respond or exceed block timeout.
+
+## Block Timeout
+
+In addition to block lag, RPCGofer monitors how long since the last block was received from each upstream.
+
+### Configuration
+
+```json
+{
+  "blockTimeout": 30000
+}
+```
+
+### How It Works
+
+```
+1. Each time a new block is received, timestamp is recorded
+2. Periodic check runs (every blockTimeout/4, minimum 500ms)
+3. For each upstream:
+   - Calculate time since last block
+   - If exceeds blockTimeout: mark unhealthy
+4. When new block arrives: upstream can become healthy again
+```
+
+### Use Case
+
+Block timeout is particularly important for detecting "stuck" upstreams that:
+- Maintain WebSocket connection but stop sending blocks
+- Have network issues causing delayed block propagation
+- Are stuck on a fork or have consensus issues
+
+### Examples
+
+With `blockTimeout: 30000` (30 seconds):
+
+| Upstream | Last Block | Time Since | Status |
+|----------|------------|------------|--------|
+| A | 5s ago | 5000ms | Healthy |
+| B | 25s ago | 25000ms | Healthy |
+| C | 35s ago | 35000ms | Unhealthy |
+
+### Logging
+
+```
+WARN upstream block timeout, marking unhealthy upstream=nodeC timeSinceBlock=35s timeout=30s
+```
 
 ## Health Status Transitions
 
@@ -92,6 +138,7 @@ Setting `blockLagThreshold: 0` effectively disables lag-based health checks. Ups
 
 Triggers:
 - Block lag exceeds threshold
+- Block timeout exceeded (no new blocks within configured time)
 - WebSocket connection lost
 - HTTP health check fails
 - Request timeout
@@ -143,6 +190,47 @@ INFO upstreams status group=ethereum maxBlock=1000000
 | unhealthyMain | Main upstreams exceeding lag threshold |
 | healthyFallback | Fallback upstreams within lag threshold |
 | unhealthyFallback | Fallback upstreams exceeding lag threshold |
+
+## Request Statistics Logging
+
+Periodic logging of request counts per upstream provides visibility into traffic distribution.
+
+### Configuration
+
+```json
+{
+  "statsLogInterval": 60000  // Log every 60 seconds
+}
+```
+
+### Log Format
+
+```
+INFO request statistics group=ethereum totalRequests=150 interval=60s 
+     infura=80 alchemy=65 public-fallback=5
+```
+
+### Statistics Fields
+
+| Field | Description |
+|-------|-------------|
+| totalRequests | Total number of requests sent to all upstreams during the interval |
+| interval | Duration of the statistics collection period |
+| [upstream_name] | Number of requests sent to each specific upstream |
+
+### How It Works
+
+1. Each request to an upstream increments an atomic counter
+2. Batch requests increment the counter by the number of requests in the batch
+3. At each `statsLogInterval`, counters are read and reset to zero
+4. Statistics reflect requests sent during the previous interval only
+
+### Use Cases
+
+- **Load balancing verification**: Ensure traffic is distributed according to weights
+- **Upstream utilization monitoring**: Identify heavily/lightly used upstreams
+- **Fallback usage tracking**: Monitor how often fallback upstreams are used
+- **Capacity planning**: Understand request volumes per upstream
 
 ## Connection Management
 
