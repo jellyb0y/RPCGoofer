@@ -108,8 +108,57 @@ func (hm *HealthMonitor) OnBlock(upstreamName string, result json.RawMessage) {
 		Msg("new block from shared subscription")
 }
 
+// fetchInitialBlocks fetches the current block number from all upstreams in parallel
+func (hm *HealthMonitor) fetchInitialBlocks() {
+	var wg sync.WaitGroup
+
+	for _, u := range hm.upstreams {
+		if !u.HasRPC() {
+			continue
+		}
+		wg.Add(1)
+		go func(u *Upstream) {
+			defer wg.Done()
+			hm.pollBlockNumber(u)
+		}(u)
+	}
+
+	wg.Wait()
+
+	// Log initial blocks for all upstreams
+	hm.mu.RLock()
+	maxBlock := hm.maxBlock
+	hm.mu.RUnlock()
+
+	for _, u := range hm.upstreams {
+		block := u.GetCurrentBlock()
+		healthy := u.IsHealthy()
+
+		if block > 0 {
+			hm.logger.Info().
+				Str("upstream", u.Name()).
+				Uint64("block", block).
+				Bool("healthy", healthy).
+				Msg("fetched initial block")
+		} else {
+			hm.logger.Warn().
+				Str("upstream", u.Name()).
+				Bool("healthy", healthy).
+				Msg("failed to fetch initial block")
+		}
+	}
+
+	hm.logger.Info().
+		Uint64("maxBlock", maxBlock).
+		Int("upstreams", len(hm.upstreams)).
+		Msg("initial blocks fetched")
+}
+
 // Start begins health monitoring
 func (hm *HealthMonitor) Start() {
+	// Fetch initial blocks from all upstreams
+	hm.fetchInitialBlocks()
+
 	// If we have a shared subscription provider, use it for newHeads
 	if hm.newHeadsProvider != nil {
 		// Subscribe to newHeads through the shared subscription manager

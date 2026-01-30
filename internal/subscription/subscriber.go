@@ -17,4 +17,7 @@ type Subscriber interface {
 	OnEvent(event SubscriptionEvent)
 	// ID returns a unique identifier for this subscriber
 	ID() string
+	// SkipDedup returns true if this subscriber should receive all events
+	// without deduplication (e.g. for health monitoring)
+	SkipDedup() bool
 }

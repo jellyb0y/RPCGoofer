@@ -472,12 +472,13 @@ func (s *SharedSubscription) readUpstreamEvents(upstreamName string, upSub *shar
 			continue
 		}
 
-		// Check for duplicates
-		if s.dedup.IsDuplicate(s.subType, notification.Params.Result) {
+		// Check for duplicates (but still broadcast to subscribers that skip dedup)
+		isDuplicate := s.dedup.IsDuplicate(s.subType, notification.Params.Result)
+
+		if isDuplicate {
 			s.logger.Debug().
 				Str("upstream", upstreamName).
-				Msg("duplicate event, skipping")
-			continue
+				Msg("duplicate event, broadcasting only to skipDedup subscribers")
 		}
 
 		// Create event and broadcast to all subscribers
@@ -487,17 +488,20 @@ func (s *SharedSubscription) readUpstreamEvents(upstreamName string, upSub *shar
 			Result:       notification.Params.Result,
 		}
 
-		s.broadcastEvent(event)
+		s.broadcastEvent(event, isDuplicate)
 
-		s.logger.Debug().
-			Str("upstream", upstreamName).
-			Str("type", string(s.subType)).
-			Msg("broadcasted event to subscribers")
+		if !isDuplicate {
+			s.logger.Debug().
+				Str("upstream", upstreamName).
+				Str("type", string(s.subType)).
+				Msg("broadcasted event to subscribers")
+		}
 	}
 }
 
 // broadcastEvent sends an event to all subscribers
-func (s *SharedSubscription) broadcastEvent(event SubscriptionEvent) {
+// isDuplicate indicates if this event was already seen from another upstream
+func (s *SharedSubscription) broadcastEvent(event SubscriptionEvent, isDuplicate bool) {
 	s.mu.RLock()
 	subscribers := make([]Subscriber, 0, len(s.subscribers))
 	for _, sub := range s.subscribers {
@@ -506,6 +510,10 @@ func (s *SharedSubscription) broadcastEvent(event SubscriptionEvent) {
 	s.mu.RUnlock()
 
 	for _, sub := range subscribers {
+		// Skip duplicate events for subscribers that don't want them
+		if isDuplicate && !sub.SkipDedup() {
+			continue
+		}
 		sub.OnEvent(event)
 	}
 }
@@ -570,4 +578,9 @@ func (w *newHeadsSubscriberWrapper) OnEvent(event SubscriptionEvent) {
 // ID implements Subscriber interface
 func (w *newHeadsSubscriberWrapper) ID() string {
 	return w.subscriber.ID()
+}
+
+// SkipDedup implements Subscriber interface
+func (w *newHeadsSubscriberWrapper) SkipDedup() bool {
+	return true // HealthMonitor needs all events from all upstreams
 }
