@@ -14,6 +14,7 @@ type Pool struct {
 	upstreams        []*Upstream
 	monitor          *HealthMonitor
 	newHeadsProvider NewHeadsProvider
+	methodStats      *MethodStats
 	logger           zerolog.Logger
 	mu               sync.RWMutex
 }
@@ -38,11 +39,15 @@ func NewPool(groupCfg config.GroupConfig, globalCfg *config.Config, logger zerol
 		poolLogger,
 	)
 
+	methodStats := NewMethodStats()
+	monitor.SetMethodStats(methodStats)
+
 	return &Pool{
-		name:      groupCfg.Name,
-		upstreams: upstreams,
-		monitor:   monitor,
-		logger:    poolLogger,
+		name:        groupCfg.Name,
+		upstreams:   upstreams,
+		monitor:     monitor,
+		methodStats: methodStats,
+		logger:      poolLogger,
 	}
 }
 
@@ -250,4 +255,21 @@ func (p *Pool) SetNewHeadsProvider(provider NewHeadsProvider) {
 // GetNewHeadsProvider returns the NewHeadsProvider
 func (p *Pool) GetNewHeadsProvider() NewHeadsProvider {
 	return p.newHeadsProvider
+}
+
+// RecordMethod increments the method call counter
+func (p *Pool) RecordMethod(method string) {
+	p.methodStats.Increment(method)
+}
+
+// RecordMethods increments method call counters for multiple methods
+func (p *Pool) RecordMethods(methods []string) {
+	for _, method := range methods {
+		p.methodStats.Increment(method)
+	}
+}
+
+// GetMethodStats returns the method stats
+func (p *Pool) GetMethodStats() *MethodStats {
+	return p.methodStats
 }

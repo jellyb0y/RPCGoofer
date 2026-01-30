@@ -329,6 +329,9 @@ func (s *SharedSubscription) subscribeToUpstream(ctx context.Context, u *upstrea
 		return nil, fmt.Errorf("failed to parse subscription ID: %w", err)
 	}
 
+	// Increment subscription count for the upstream
+	u.IncrementSubscriptionCount()
+
 	return &sharedUpstreamSub{
 		id:        upstreamSubID,
 		conn:      conn,
@@ -410,6 +413,10 @@ func (s *SharedSubscription) cleanupUpstreamSub(upstreamName string, upSub *shar
 	if upSub.conn != nil {
 		upSub.conn.Close()
 	}
+	// Decrement subscription count
+	if u := s.pool.GetByName(upstreamName); u != nil {
+		u.DecrementSubscriptionCount()
+	}
 	s.mu.Lock()
 	delete(s.upstreamSubs, upstreamName)
 	s.mu.Unlock()
@@ -472,6 +479,11 @@ func (s *SharedSubscription) readUpstreamEvents(upstreamName string, upSub *shar
 			continue
 		}
 
+		// Increment subscription events counter for the upstream
+		if u := s.pool.GetByName(upstreamName); u != nil {
+			u.IncrementSubscriptionEvents()
+		}
+
 		// Check for duplicates (but still broadcast to subscribers that skip dedup)
 		isDuplicate := s.dedup.IsDuplicate(s.subType, notification.Params.Result)
 
@@ -526,12 +538,21 @@ func (s *SharedSubscription) unsubscribeFromUpstream(upstreamName string, upSub 
 	req, err := jsonrpc.NewRequest("eth_unsubscribe", []string{upSub.id}, jsonrpc.NewIDInt(1))
 	if err != nil {
 		upSub.conn.Close()
+		// Decrement subscription count
+		if u := s.pool.GetByName(upstreamName); u != nil {
+			u.DecrementSubscriptionCount()
+		}
 		return
 	}
 
 	reqBytes, _ := req.Bytes()
 	upSub.conn.WriteMessage(websocket.TextMessage, reqBytes)
 	upSub.conn.Close()
+
+	// Decrement subscription count
+	if u := s.pool.GetByName(upstreamName); u != nil {
+		u.DecrementSubscriptionCount()
+	}
 
 	s.logger.Debug().
 		Str("upstream", upstreamName).
