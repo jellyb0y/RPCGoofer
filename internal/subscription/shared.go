@@ -18,25 +18,29 @@ import (
 
 // SharedSubscriptionManager manages shared subscriptions across all clients and internal consumers
 type SharedSubscriptionManager struct {
-	subscriptions map[string]*SharedSubscription // key -> shared subscription
-	pool          *upstream.Pool
-	dedupSize     int
-	mu            sync.RWMutex
-	logger        zerolog.Logger
-	ctx           context.Context
-	cancel        context.CancelFunc
+	subscriptions     map[string]*SharedSubscription // key -> shared subscription
+	pool              *upstream.Pool
+	dedupSize         int
+	messageTimeout    time.Duration
+	reconnectInterval time.Duration
+	mu                sync.RWMutex
+	logger            zerolog.Logger
+	ctx               context.Context
+	cancel            context.CancelFunc
 }
 
 // NewSharedSubscriptionManager creates a new SharedSubscriptionManager
-func NewSharedSubscriptionManager(pool *upstream.Pool, dedupSize int, logger zerolog.Logger) *SharedSubscriptionManager {
+func NewSharedSubscriptionManager(pool *upstream.Pool, dedupSize int, messageTimeout time.Duration, reconnectInterval time.Duration, logger zerolog.Logger) *SharedSubscriptionManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &SharedSubscriptionManager{
-		subscriptions: make(map[string]*SharedSubscription),
-		pool:          pool,
-		dedupSize:     dedupSize,
-		logger:        logger.With().Str("component", "shared-subscription-manager").Logger(),
-		ctx:           ctx,
-		cancel:        cancel,
+		subscriptions:     make(map[string]*SharedSubscription),
+		pool:              pool,
+		dedupSize:         dedupSize,
+		messageTimeout:    messageTimeout,
+		reconnectInterval: reconnectInterval,
+		logger:            logger.With().Str("component", "shared-subscription-manager").Logger(),
+		ctx:               ctx,
+		cancel:            cancel,
 	}
 }
 
@@ -152,15 +156,18 @@ func (m *SharedSubscriptionManager) createSharedSubscription(ctx context.Context
 	}
 
 	shared := &SharedSubscription{
-		key:          key,
-		subType:      subType,
-		params:       params,
-		upstreamSubs: make(map[string]*sharedUpstreamSub),
-		subscribers:  make(map[string]Subscriber),
-		dedup:        dedup,
-		logger:       m.logger.With().Str("key", key).Logger(),
-		closeChan:    make(chan struct{}),
-		pool:         m.pool,
+		key:               key,
+		subType:           subType,
+		params:            params,
+		upstreamSubs:      make(map[string]*sharedUpstreamSub),
+		subscribers:       make(map[string]Subscriber),
+		dedup:             dedup,
+		logger:            m.logger.With().Str("key", key).Logger(),
+		closeChan:         make(chan struct{}),
+		pool:              m.pool,
+		messageTimeout:    m.messageTimeout,
+		reconnectInterval: m.reconnectInterval,
+		managerCtx:        m.ctx,
 	}
 
 	// Subscribe to all upstreams with WebSocket
@@ -176,8 +183,8 @@ func (m *SharedSubscriptionManager) createSharedSubscription(ctx context.Context
 		}
 		shared.upstreamSubs[u.Name()] = upSub
 
-		// Start reading events from this upstream
-		go shared.readUpstreamEvents(u.Name(), upSub)
+		// Start reading events from this upstream with reconnection support
+		go shared.readUpstreamEventsWithReconnect(u, upSub)
 	}
 
 	if len(shared.upstreamSubs) == 0 {
@@ -189,17 +196,20 @@ func (m *SharedSubscriptionManager) createSharedSubscription(ctx context.Context
 
 // SharedSubscription represents a subscription shared between multiple subscribers
 type SharedSubscription struct {
-	key          string
-	subType      SubscriptionType
-	params       json.RawMessage
-	upstreamSubs map[string]*sharedUpstreamSub // upstream name -> subscription
-	subscribers  map[string]Subscriber         // subscriber ID -> subscriber
-	dedup        *Deduplicator
-	mu           sync.RWMutex
-	logger       zerolog.Logger
-	closeChan    chan struct{}
-	closed       bool
-	pool         *upstream.Pool
+	key               string
+	subType           SubscriptionType
+	params            json.RawMessage
+	upstreamSubs      map[string]*sharedUpstreamSub // upstream name -> subscription
+	subscribers       map[string]Subscriber         // subscriber ID -> subscriber
+	dedup             *Deduplicator
+	mu                sync.RWMutex
+	logger            zerolog.Logger
+	closeChan         chan struct{}
+	closed            bool
+	pool              *upstream.Pool
+	messageTimeout    time.Duration
+	reconnectInterval time.Duration
+	managerCtx        context.Context
 }
 
 // sharedUpstreamSub represents a subscription to a single upstream
@@ -326,32 +336,130 @@ func (s *SharedSubscription) subscribeToUpstream(ctx context.Context, u *upstrea
 	}, nil
 }
 
-// readUpstreamEvents reads events from an upstream subscription and broadcasts to all subscribers
-func (s *SharedSubscription) readUpstreamEvents(upstreamName string, upSub *sharedUpstreamSub) {
-	defer func() {
-		upSub.conn.Close()
-		s.mu.Lock()
-		delete(s.upstreamSubs, upstreamName)
-		s.mu.Unlock()
-	}()
+// readUpstreamEventsWithReconnect reads events from an upstream subscription with automatic reconnection
+func (s *SharedSubscription) readUpstreamEventsWithReconnect(u *upstream.Upstream, upSub *sharedUpstreamSub) {
+	upstreamName := u.Name()
 
 	for {
+		// Check if we should stop
 		select {
 		case <-s.closeChan:
+			s.cleanupUpstreamSub(upstreamName, upSub)
 			return
-		case <-upSub.closeChan:
+		case <-s.managerCtx.Done():
+			s.cleanupUpstreamSub(upstreamName, upSub)
 			return
 		default:
 		}
 
-		upSub.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		_, data, err := upSub.conn.ReadMessage()
+		// Read events until error
+		shouldReconnect := s.readUpstreamEvents(upstreamName, upSub)
+
+		if !shouldReconnect {
+			s.cleanupUpstreamSub(upstreamName, upSub)
+			return
+		}
+
+		// Clean up current connection
+		upSub.conn.Close()
+
+		// Wait before reconnecting
+		s.logger.Info().
+			Str("upstream", upstreamName).
+			Dur("interval", s.reconnectInterval).
+			Msg("waiting before reconnection attempt")
+
+		select {
+		case <-s.closeChan:
+			s.mu.Lock()
+			delete(s.upstreamSubs, upstreamName)
+			s.mu.Unlock()
+			return
+		case <-s.managerCtx.Done():
+			s.mu.Lock()
+			delete(s.upstreamSubs, upstreamName)
+			s.mu.Unlock()
+			return
+		case <-time.After(s.reconnectInterval):
+		}
+
+		// Attempt to reconnect
+		newUpSub, err := s.reconnectToUpstream(u)
 		if err != nil {
-			s.logger.Debug().
+			s.logger.Warn().
 				Err(err).
 				Str("upstream", upstreamName).
-				Msg("upstream read error")
-			return
+				Msg("failed to reconnect to upstream, will retry")
+			continue
+		}
+
+		// Update the subscription
+		s.mu.Lock()
+		s.upstreamSubs[upstreamName] = newUpSub
+		s.mu.Unlock()
+		upSub = newUpSub
+
+		s.logger.Info().
+			Str("upstream", upstreamName).
+			Msg("successfully reconnected to upstream")
+	}
+}
+
+// cleanupUpstreamSub cleans up an upstream subscription
+func (s *SharedSubscription) cleanupUpstreamSub(upstreamName string, upSub *sharedUpstreamSub) {
+	if upSub.conn != nil {
+		upSub.conn.Close()
+	}
+	s.mu.Lock()
+	delete(s.upstreamSubs, upstreamName)
+	s.mu.Unlock()
+}
+
+// reconnectToUpstream attempts to reconnect to an upstream
+func (s *SharedSubscription) reconnectToUpstream(u *upstream.Upstream) (*sharedUpstreamSub, error) {
+	ctx, cancel := context.WithTimeout(s.managerCtx, 30*time.Second)
+	defer cancel()
+
+	return s.subscribeToUpstream(ctx, u, s.subType, s.params)
+}
+
+// readUpstreamEvents reads events from an upstream subscription and broadcasts to all subscribers
+// Returns true if reconnection should be attempted, false if we should stop completely
+func (s *SharedSubscription) readUpstreamEvents(upstreamName string, upSub *sharedUpstreamSub) bool {
+	for {
+		select {
+		case <-s.closeChan:
+			return false
+		case <-upSub.closeChan:
+			return false
+		case <-s.managerCtx.Done():
+			return false
+		default:
+		}
+
+		// Set read deadline based on configured timeout
+		readTimeout := s.messageTimeout
+		if readTimeout == 0 {
+			readTimeout = 60 * time.Second
+		}
+		upSub.conn.SetReadDeadline(time.Now().Add(readTimeout))
+
+		_, data, err := upSub.conn.ReadMessage()
+		if err != nil {
+			// Check if the shared subscription is being closed
+			select {
+			case <-s.closeChan:
+				return false
+			case <-s.managerCtx.Done():
+				return false
+			default:
+			}
+
+			s.logger.Warn().
+				Err(err).
+				Str("upstream", upstreamName).
+				Msg("upstream read error, will attempt reconnection")
+			return true // Indicate that reconnection should be attempted
 		}
 
 		// Parse notification

@@ -78,7 +78,13 @@ func (s *Server) AddGroup(groupCfg config.GroupConfig) {
 	pool := upstream.NewPool(groupCfg, s.cfg, s.logger)
 
 	// Create SharedSubscriptionManager for this pool
-	sharedSubMgr := subscription.NewSharedSubscriptionManager(pool, s.cfg.DedupCacheSize, s.logger)
+	sharedSubMgr := subscription.NewSharedSubscriptionManager(
+		pool,
+		s.cfg.DedupCacheSize,
+		s.cfg.GetUpstreamMessageTimeoutDuration(),
+		s.cfg.GetUpstreamReconnectIntervalDuration(),
+		s.logger,
+	)
 	s.sharedSubMgrs[groupCfg.Name] = sharedSubMgr
 
 	// Set up NewHeadsProvider for health monitoring

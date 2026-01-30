@@ -61,6 +61,12 @@ func applyDefaults(cfg *Config) {
 	if cfg.LagRecoveryTimeout == 0 {
 		cfg.LagRecoveryTimeout = DefaultLagRecoveryTimeout
 	}
+	if cfg.UpstreamMessageTimeout == 0 {
+		cfg.UpstreamMessageTimeout = DefaultUpstreamMessageTimeout
+	}
+	if cfg.UpstreamReconnectInterval == 0 {
+		cfg.UpstreamReconnectInterval = DefaultUpstreamReconnectInterval
+	}
 	if cfg.DedupCacheSize == 0 {
 		cfg.DedupCacheSize = DefaultDedupCacheSize
 	}
