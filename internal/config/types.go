@@ -58,9 +58,10 @@ type BatchingConfig struct {
 
 // BatchMethodConfig represents batching configuration for a specific method
 type BatchMethodConfig struct {
-	MaxSize        int `json:"maxSize"`        // maximum batch size
-	MaxWait        int `json:"maxWait"`        // maximum wait time in milliseconds
-	AggregateParam int `json:"aggregateParam"` // index of the parameter to aggregate
+	MaxSize        int  `json:"maxSize"`        // maximum batch size
+	MaxWait        int  `json:"maxWait"`        // maximum wait time in milliseconds
+	AggregateParam int  `json:"aggregateParam"` // index of the parameter to aggregate
+	Spread         bool `json:"spread"`         // if true, params is the array itself (no nesting)
 }
 
 // GroupConfig represents a group of upstreams

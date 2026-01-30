@@ -13,6 +13,7 @@ RPCGofer is a high-performance JSON-RPC proxy designed for Ethereum-compatible b
 2. [Architecture Overview](./architecture.md)
    - System Components
    - Request Flow
+   - Batch Requests
    - Module Structure
 
 3. [Configuration Reference](./configuration.md)
@@ -42,7 +43,18 @@ RPCGofer is a high-performance JSON-RPC proxy designed for Ethereum-compatible b
    - Multi-Upstream Aggregation
    - Event Deduplication
 
-8. [Deployment](./deployment.md)
+8. [Plugins](./plugins.md)
+   - Writing Custom RPC Methods
+   - Available APIs (upstream, utils, console)
+   - Configuration and Directory Setup
+   - Examples and Best Practices
+
+9. [Request Batching](./batching.md)
+   - Automatic Request Coalescing
+   - Configuration and Batch Keys
+   - Performance Tuning
+
+10. [Deployment](./deployment.md)
    - Docker and Docker Compose
    - Building from Source
    - Systemd Service

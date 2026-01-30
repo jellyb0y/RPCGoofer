@@ -55,7 +55,8 @@ Add the `batching` section to your `config.json`:
       "custom_isContract": {
         "maxSize": 100,
         "maxWait": 500,
-        "aggregateParam": 0
+        "aggregateParam": 0,
+        "spread": true
       }
     }
   }
@@ -76,6 +77,7 @@ Add the `batching` section to your `config.json`:
 | `maxSize` | int | `100` | Maximum number of elements in a batch |
 | `maxWait` | int | `500` | Maximum wait time in milliseconds before flushing |
 | `aggregateParam` | int | - | Index of the parameter that contains the array to aggregate |
+| `spread` | bool | `false` | When true, entire params array is aggregated (no nesting) |
 
 ## How It Works
 
@@ -90,6 +92,33 @@ For example, with `aggregateParam: 0`:
 custom_isContract(["0xA"], "latest")  --> key: "custom_isContract:["latest"]"
 custom_isContract(["0xB"], "latest")  --> key: "custom_isContract:["latest"]" (same batch)
 custom_isContract(["0xC"], "pending") --> key: "custom_isContract:["pending"]" (different batch)
+```
+
+### Standard vs Spread Mode
+
+**Standard mode** (`spread: false`, default):
+- Aggregate parameter is nested inside params array
+- Key params are all other parameters
+- Input: `params = [["0xA"], "latest"]` (aggregateParam=0)
+- Aggregated: `params = [["0xA", "0xB", "0xC"], "latest"]`
+
+**Spread mode** (`spread: true`):
+- Entire params array is the aggregated elements
+- No key params (all requests go to same batch)
+- Input: `params = ["0xA"]`
+- Aggregated: `params = ["0xA", "0xB", "0xC"]`
+
+Use spread mode when:
+- Your method only accepts a flat array of elements (no other parameters)
+- Your plugin expects `params` to be the array directly, not nested
+
+Example with spread mode:
+```
+Client 1: custom_isContract(["0xA"])  -->  params = ["0xA"]
+Client 2: custom_isContract(["0xB"])  -->  params = ["0xB"]
+                                          |
+                                          v
+                        Aggregated: params = ["0xA", "0xB"]
 ```
 
 ### Flush Triggers

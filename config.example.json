@@ -25,7 +25,8 @@
       "custom_isContract": {
         "maxSize": 100,
         "maxWait": 500,
-        "aggregateParam": 0
+        "aggregateParam": 0,
+        "spread": true
       }
     }
   },

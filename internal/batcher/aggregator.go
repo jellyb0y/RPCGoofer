@@ -73,18 +73,38 @@ func (a *Aggregator) Add(ctx context.Context, groupName string, req *jsonrpc.Req
 		return responseChan
 	}
 
-	// Validate aggregate param index
-	if cfg.AggregateParam >= len(params) {
-		responseChan <- jsonrpc.NewErrorResponse(req.ID, jsonrpc.NewError(jsonrpc.CodeInvalidParams, "aggregate param index out of range"))
-		return responseChan
-	}
+	var elements []interface{}
+	var keyParams []interface{}
 
-	// Extract aggregate elements
-	aggregateValue := params[cfg.AggregateParam]
-	elements, ok := toSlice(aggregateValue)
-	if !ok {
-		// Single element - wrap in slice
-		elements = []interface{}{aggregateValue}
+	if cfg.Spread {
+		// Spread mode: entire params array is the elements to aggregate
+		// No key params in this mode
+		elements = params
+		keyParams = nil
+	} else {
+		// Standard mode: aggregate specific param index
+		// Validate aggregate param index
+		if cfg.AggregateParam >= len(params) {
+			responseChan <- jsonrpc.NewErrorResponse(req.ID, jsonrpc.NewError(jsonrpc.CodeInvalidParams, "aggregate param index out of range"))
+			return responseChan
+		}
+
+		// Extract aggregate elements
+		aggregateValue := params[cfg.AggregateParam]
+		var ok bool
+		elements, ok = toSlice(aggregateValue)
+		if !ok {
+			// Single element - wrap in slice
+			elements = []interface{}{aggregateValue}
+		}
+
+		// Build key params (all params except aggregate)
+		keyParams = make([]interface{}, 0, len(params)-1)
+		for i, p := range params {
+			if i != cfg.AggregateParam {
+				keyParams = append(keyParams, p)
+			}
+		}
 	}
 
 	if len(elements) == 0 {
@@ -96,14 +116,6 @@ func (a *Aggregator) Add(ctx context.Context, groupName string, req *jsonrpc.Req
 			Result:  emptyResult,
 		}
 		return responseChan
-	}
-
-	// Build key params (all params except aggregate)
-	keyParams := make([]interface{}, 0, len(params)-1)
-	for i, p := range params {
-		if i != cfg.AggregateParam {
-			keyParams = append(keyParams, p)
-		}
 	}
 
 	// Generate batch key
@@ -199,7 +211,15 @@ func (a *Aggregator) flush(ctx context.Context, groupName string, batchKey Batch
 	// Build aggregated request params
 	cfg := bucket.GetConfig()
 	keyParams := bucket.GetKeyParams()
-	params := buildParams(keyParams, aggregated, cfg.AggregateParam)
+
+	var params []interface{}
+	if cfg.Spread {
+		// Spread mode: params IS the aggregated array directly
+		params = aggregated
+	} else {
+		// Standard mode: insert aggregated array at aggregateParam index
+		params = buildParams(keyParams, aggregated, cfg.AggregateParam)
+	}
 
 	paramsJSON, err := json.Marshal(params)
 	if err != nil {
