@@ -9,9 +9,11 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
 
+	"rpcgofer/internal/batcher"
 	"rpcgofer/internal/cache"
 	"rpcgofer/internal/config"
 	"rpcgofer/internal/jsonrpc"
+	"rpcgofer/internal/plugin"
 	"rpcgofer/internal/proxy"
 	"rpcgofer/internal/subscription"
 	"rpcgofer/internal/upstream"
@@ -26,13 +28,15 @@ const (
 
 // Client represents a WebSocket client connection
 type Client struct {
-	conn        *websocket.Conn
-	pool        *upstream.Pool
-	groupName   string
-	cache       cache.Cache
-	subManager  *subscription.Manager
-	retryConfig proxy.RetryConfig
-	logger      zerolog.Logger
+	conn            *websocket.Conn
+	pool            *upstream.Pool
+	groupName       string
+	cache           cache.Cache
+	subManager      *subscription.Manager
+	pluginManager   *plugin.PluginManager
+	batchAggregator *batcher.Aggregator
+	retryConfig     proxy.RetryConfig
+	logger          zerolog.Logger
 
 	sendChan  chan []byte
 	closeChan chan struct{}
@@ -40,13 +44,15 @@ type Client struct {
 }
 
 // NewClient creates a new WebSocket client
-func NewClient(conn *websocket.Conn, pool *upstream.Pool, groupName string, rpcCache cache.Cache, subManager *subscription.Manager, cfg *config.Config, logger zerolog.Logger) *Client {
+func NewClient(conn *websocket.Conn, pool *upstream.Pool, groupName string, rpcCache cache.Cache, subManager *subscription.Manager, cfg *config.Config, pluginManager *plugin.PluginManager, batchAggregator *batcher.Aggregator, logger zerolog.Logger) *Client {
 	return &Client{
-		conn:       conn,
-		pool:       pool,
-		groupName:  groupName,
-		cache:      rpcCache,
-		subManager: subManager,
+		conn:            conn,
+		pool:            pool,
+		groupName:       groupName,
+		cache:           rpcCache,
+		subManager:      subManager,
+		pluginManager:   pluginManager,
+		batchAggregator: batchAggregator,
 		retryConfig: proxy.RetryConfig{
 			Enabled:     cfg.RetryEnabled,
 			MaxAttempts: cfg.RetryMaxAttempts,
@@ -167,6 +173,28 @@ func (c *Client) handleSingle(ctx context.Context, req *jsonrpc.Request) {
 		return
 	}
 
+	// Check if this method supports batching (before plugins and cache)
+	if c.batchAggregator != nil && c.batchAggregator.GetConfig(req.Method) != nil {
+		c.logger.Debug().
+			Str("method", req.Method).
+			Msg("adding to batch (ws)")
+		responseChan := c.batchAggregator.Add(ctx, c.groupName, req)
+		resp := <-responseChan
+		c.sendResponse(resp)
+		return
+	}
+
+	// Check if this method is handled by a plugin (no retries for plugin upstream calls)
+	if c.pluginManager != nil && c.pluginManager.HasPlugin(req.Method) {
+		caller := plugin.NewPoolCaller(ctx, c.pool, plugin.RetryConfig{Enabled: false}, c.logger)
+		c.logger.Debug().
+			Str("method", req.Method).
+			Msg("executing plugin (ws)")
+		resp := c.pluginManager.Execute(ctx, req.Method, req.ID, req.Params, caller)
+		c.sendResponse(resp)
+		return
+	}
+
 	// Check cache first
 	if cache.IsCacheable(req.Method, req.Params) {
 		cacheKey := cache.GenerateCacheKey(c.groupName, req.Method, req.Params)
@@ -241,8 +269,28 @@ func (c *Client) handleBatch(ctx context.Context, requests []*jsonrpc.Request) {
 		uncachedIndices := make([]int, 0, len(regularReqs))
 		uncachedRequests := make([]*jsonrpc.Request, 0, len(regularReqs))
 
-		// Check cache for each request
+		// Check batching, plugin and cache for each request
 		for i, req := range regularReqs {
+			// Check if this method supports batching
+			if c.batchAggregator != nil && c.batchAggregator.GetConfig(req.Method) != nil {
+				c.logger.Debug().
+					Str("method", req.Method).
+					Msg("adding to batch (ws batch)")
+				responseChan := c.batchAggregator.Add(ctx, c.groupName, req)
+				responses[i] = <-responseChan
+				continue
+			}
+
+			// Check if this method is handled by a plugin (no retries for plugin upstream calls)
+			if c.pluginManager != nil && c.pluginManager.HasPlugin(req.Method) {
+				caller := plugin.NewPoolCaller(ctx, c.pool, plugin.RetryConfig{Enabled: false}, c.logger)
+				c.logger.Debug().
+					Str("method", req.Method).
+					Msg("executing plugin (ws batch)")
+				responses[i] = c.pluginManager.Execute(ctx, req.Method, req.ID, req.Params, caller)
+				continue
+			}
+
 			if cache.IsCacheable(req.Method, req.Params) {
 				cacheKey := cache.GenerateCacheKey(c.groupName, req.Method, req.Params)
 				if cachedData, found := c.cache.Get(cacheKey); found {

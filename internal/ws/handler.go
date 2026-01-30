@@ -7,8 +7,10 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
 
+	"rpcgofer/internal/batcher"
 	"rpcgofer/internal/cache"
 	"rpcgofer/internal/config"
+	"rpcgofer/internal/plugin"
 	"rpcgofer/internal/proxy"
 	"rpcgofer/internal/subscription"
 )
@@ -23,21 +25,25 @@ var upgrader = websocket.Upgrader{
 
 // Handler handles WebSocket connections
 type Handler struct {
-	router     *proxy.Router
-	cache      cache.Cache
-	subManager *subscription.Manager
-	cfg        *config.Config
-	logger     zerolog.Logger
+	router           *proxy.Router
+	cache            cache.Cache
+	subManager       *subscription.Manager
+	cfg              *config.Config
+	pluginManager    *plugin.PluginManager
+	batchAggregator  *batcher.Aggregator
+	logger           zerolog.Logger
 }
 
 // NewHandler creates a new WebSocket handler
-func NewHandler(router *proxy.Router, rpcCache cache.Cache, subManager *subscription.Manager, cfg *config.Config, logger zerolog.Logger) *Handler {
+func NewHandler(router *proxy.Router, rpcCache cache.Cache, subManager *subscription.Manager, cfg *config.Config, pluginManager *plugin.PluginManager, batchAggregator *batcher.Aggregator, logger zerolog.Logger) *Handler {
 	return &Handler{
-		router:     router,
-		cache:      rpcCache,
-		subManager: subManager,
-		cfg:        cfg,
-		logger:     logger.With().Str("component", "ws").Logger(),
+		router:          router,
+		cache:          rpcCache,
+		subManager:     subManager,
+		cfg:            cfg,
+		pluginManager:  pluginManager,
+		batchAggregator: batchAggregator,
+		logger:         logger.With().Str("component", "ws").Logger(),
 	}
 }
 
@@ -66,7 +72,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Msg("new WebSocket connection")
 
 	// Create and run client
-	client := NewClient(conn, pool, groupName, h.cache, h.subManager, h.cfg, h.logger.With().Str("remoteAddr", r.RemoteAddr).Logger())
+	client := NewClient(conn, pool, groupName, h.cache, h.subManager, h.cfg, h.pluginManager, h.batchAggregator, h.logger.With().Str("remoteAddr", r.RemoteAddr).Logger())
 	client.Run(r.Context())
 }
 

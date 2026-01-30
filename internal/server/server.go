@@ -159,7 +159,7 @@ func (s *Server) Start() error {
 	}
 
 	// Create WebSocket handler
-	wsHandler := ws.NewHandler(s.router, s.cache, s.subManager, s.cfg, s.logger)
+	wsHandler := ws.NewHandler(s.router, s.cache, s.subManager, s.cfg, s.pluginManager, s.batchAggregator, s.logger)
 
 	rpcAddr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.RPCPort)
 	wsAddr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.WSPort)

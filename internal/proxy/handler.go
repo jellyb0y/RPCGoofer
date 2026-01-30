@@ -122,12 +122,9 @@ func (h *Handler) executeWithCache(ctx context.Context, pool *upstream.Pool, gro
 		return <-responseChan
 	}
 
-	// Check if this method is handled by a plugin
+	// Check if this method is handled by a plugin (no retries for plugin upstream calls)
 	if h.pluginManager != nil && h.pluginManager.HasPlugin(req.Method) {
-		caller := plugin.NewPoolCaller(ctx, pool, plugin.RetryConfig{
-			Enabled:     h.retryConfig.Enabled,
-			MaxAttempts: h.retryConfig.MaxAttempts,
-		}, h.logger)
+		caller := plugin.NewPoolCaller(ctx, pool, plugin.RetryConfig{Enabled: false}, h.logger)
 		h.logger.Debug().
 			Str("method", req.Method).
 			Msg("executing plugin")
@@ -191,12 +188,9 @@ func (h *Handler) executeBatchWithCache(ctx context.Context, pool *upstream.Pool
 			continue
 		}
 
-		// Check if this method is handled by a plugin
+		// Check if this method is handled by a plugin (no retries for plugin upstream calls)
 		if h.pluginManager != nil && h.pluginManager.HasPlugin(req.Method) {
-			caller := plugin.NewPoolCaller(ctx, pool, plugin.RetryConfig{
-				Enabled:     h.retryConfig.Enabled,
-				MaxAttempts: h.retryConfig.MaxAttempts,
-			}, h.logger)
+			caller := plugin.NewPoolCaller(ctx, pool, plugin.RetryConfig{Enabled: false}, h.logger)
 			h.logger.Debug().
 				Str("method", req.Method).
 				Msg("executing plugin (batch)")
@@ -318,12 +312,9 @@ func (e *HandlerExecutor) ExecuteBatch(ctx context.Context, groupName string, re
 		return jsonrpc.NewErrorResponse(req.ID, jsonrpc.NewError(jsonrpc.CodeInternalError, err.Error()))
 	}
 
-	// Check if this method is handled by a plugin
+	// Check if this method is handled by a plugin (no retries for plugin upstream calls)
 	if e.handler.pluginManager != nil && e.handler.pluginManager.HasPlugin(req.Method) {
-		caller := plugin.NewPoolCaller(ctx, pool, plugin.RetryConfig{
-			Enabled:     e.handler.retryConfig.Enabled,
-			MaxAttempts: e.handler.retryConfig.MaxAttempts,
-		}, e.handler.logger)
+		caller := plugin.NewPoolCaller(ctx, pool, plugin.RetryConfig{Enabled: false}, e.handler.logger)
 		return e.handler.pluginManager.Execute(ctx, req.Method, req.ID, req.Params, caller)
 	}
 
