@@ -10,6 +10,7 @@ import (
 
 	"rpcgofer/internal/cache"
 	"rpcgofer/internal/config"
+	"rpcgofer/internal/plugin"
 	"rpcgofer/internal/proxy"
 	"rpcgofer/internal/subscription"
 	"rpcgofer/internal/upstream"
@@ -21,6 +22,7 @@ type Server struct {
 	cfg              *config.Config
 	router           *proxy.Router
 	cache            cache.Cache
+	pluginManager    *plugin.PluginManager
 	subManager       *subscription.Manager
 	sharedSubMgrs    map[string]*subscription.SharedSubscriptionManager // pool name -> shared sub manager
 	rpcServer        *http.Server
@@ -58,6 +60,31 @@ func New(cfg *config.Config, logger zerolog.Logger) (*Server, error) {
 		logger.Info().Msg("cache disabled")
 	}
 
+	// Create plugin manager based on config
+	var pluginMgr *plugin.PluginManager
+	if cfg.IsPluginsEnabled() {
+		pluginMgr = plugin.NewPluginManager(logger)
+		pluginMgr.SetTimeout(cfg.GetPluginTimeoutDuration())
+
+		if err := pluginMgr.LoadFromDirectory(cfg.GetPluginDirectory()); err != nil {
+			return nil, fmt.Errorf("failed to load plugins: %w", err)
+		}
+
+		methods := pluginMgr.GetMethods()
+		if len(methods) > 0 {
+			logger.Info().
+				Strs("methods", methods).
+				Str("directory", cfg.GetPluginDirectory()).
+				Msg("plugins enabled")
+		} else {
+			logger.Info().
+				Str("directory", cfg.GetPluginDirectory()).
+				Msg("plugins enabled but no plugins loaded")
+		}
+	} else {
+		logger.Info().Msg("plugins disabled")
+	}
+
 	sharedSubMgrs := make(map[string]*subscription.SharedSubscriptionManager)
 
 	// Create subscription manager (will receive shared sub managers later)
@@ -67,6 +94,7 @@ func New(cfg *config.Config, logger zerolog.Logger) (*Server, error) {
 		cfg:           cfg,
 		router:        router,
 		cache:         rpcCache,
+		pluginManager: pluginMgr,
 		subManager:    subManager,
 		sharedSubMgrs: sharedSubMgrs,
 		logger:        logger,
@@ -104,7 +132,7 @@ func (s *Server) Start() error {
 	s.router.StartAll()
 
 	// Create HTTP RPC handler
-	rpcHandler := proxy.NewHandler(s.router, s.cache, s.cfg, s.logger)
+	rpcHandler := proxy.NewHandler(s.router, s.cache, s.pluginManager, s.cfg, s.logger)
 
 	// Create WebSocket handler
 	wsHandler := ws.NewHandler(s.router, s.cache, s.subManager, s.cfg, s.logger)
@@ -184,6 +212,11 @@ func (s *Server) Stop(ctx context.Context) error {
 	for name, mgr := range s.sharedSubMgrs {
 		mgr.Close()
 		s.logger.Debug().Str("group", name).Msg("closed shared subscription manager")
+	}
+
+	// Close plugin manager
+	if s.pluginManager != nil {
+		s.pluginManager.Close()
 	}
 
 	// Close cache

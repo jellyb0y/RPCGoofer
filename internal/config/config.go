@@ -90,6 +90,16 @@ func applyDefaults(cfg *Config) {
 			}
 		}
 	}
+
+	// Apply defaults to plugins
+	if cfg.Plugins != nil && cfg.Plugins.Enabled {
+		if cfg.Plugins.Directory == "" {
+			cfg.Plugins.Directory = DefaultPluginDirectory
+		}
+		if cfg.Plugins.Timeout == 0 {
+			cfg.Plugins.Timeout = DefaultPluginTimeout
+		}
+	}
 }
 
 // validate checks the configuration for errors
@@ -186,6 +196,13 @@ func validate(cfg *Config) error {
 		}
 		if cfg.Cache.Size <= 0 {
 			return fmt.Errorf("cache.size must be positive when cache is enabled")
+		}
+	}
+
+	// Validate plugins config if provided
+	if cfg.Plugins != nil && cfg.Plugins.Enabled {
+		if cfg.Plugins.Timeout < 0 {
+			return fmt.Errorf("plugins.timeout must be non-negative")
 		}
 	}
 

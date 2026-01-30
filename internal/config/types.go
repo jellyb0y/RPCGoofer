@@ -27,10 +27,11 @@ type Config struct {
 	UpstreamReconnectInterval int           `json:"upstreamReconnectInterval"` // ms - interval between reconnection attempts
 	DedupCacheSize            int           `json:"dedupCacheSize"`
 	MaxSubscriptionsPerClient int           `json:"maxSubscriptionsPerClient"`
-	RetryEnabled              bool          `json:"retryEnabled"`
-	RetryMaxAttempts          int           `json:"retryMaxAttempts"`
-	Cache                     *CacheConfig  `json:"cache,omitempty"`
-	Groups                    []GroupConfig `json:"groups"`
+	RetryEnabled              bool           `json:"retryEnabled"`
+	RetryMaxAttempts          int            `json:"retryMaxAttempts"`
+	Cache                     *CacheConfig   `json:"cache,omitempty"`
+	Plugins                   *PluginConfig  `json:"plugins,omitempty"`
+	Groups                    []GroupConfig  `json:"groups"`
 }
 
 // CacheConfig represents cache configuration
@@ -39,6 +40,13 @@ type CacheConfig struct {
 	TTL             int      `json:"ttl"`             // seconds
 	Size            int      `json:"size"`            // number of entries
 	DisabledMethods []string `json:"disabledMethods"` // methods to exclude from caching
+}
+
+// PluginConfig represents plugin configuration
+type PluginConfig struct {
+	Enabled   bool   `json:"enabled"`
+	Directory string `json:"directory"` // path to plugins directory
+	Timeout   int    `json:"timeout"`   // execution timeout in milliseconds
 }
 
 // GroupConfig represents a group of upstreams
@@ -77,6 +85,8 @@ const (
 	DefaultRetryMaxAttempts          = 3
 	DefaultUpstreamWeight            = 1
 	DefaultUpstreamRole              = RoleMain
+	DefaultPluginDirectory           = "./plugins"
+	DefaultPluginTimeout             = 30000 // ms - default plugin execution timeout
 )
 
 // GetRequestTimeoutDuration returns request timeout as time.Duration
@@ -117,6 +127,27 @@ func (c *Config) GetUpstreamReconnectIntervalDuration() time.Duration {
 // IsCacheEnabled returns true if cache is configured and enabled
 func (c *Config) IsCacheEnabled() bool {
 	return c.Cache != nil && c.Cache.Enabled
+}
+
+// IsPluginsEnabled returns true if plugins are configured and enabled
+func (c *Config) IsPluginsEnabled() bool {
+	return c.Plugins != nil && c.Plugins.Enabled
+}
+
+// GetPluginDirectory returns the plugins directory path
+func (c *Config) GetPluginDirectory() string {
+	if c.Plugins == nil || c.Plugins.Directory == "" {
+		return DefaultPluginDirectory
+	}
+	return c.Plugins.Directory
+}
+
+// GetPluginTimeoutDuration returns plugin timeout as time.Duration
+func (c *Config) GetPluginTimeoutDuration() time.Duration {
+	if c.Plugins == nil || c.Plugins.Timeout == 0 {
+		return time.Duration(DefaultPluginTimeout) * time.Millisecond
+	}
+	return time.Duration(c.Plugins.Timeout) * time.Millisecond
 }
 
 // GetCacheTTLDuration returns cache TTL as time.Duration

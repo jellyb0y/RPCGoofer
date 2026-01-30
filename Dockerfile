@@ -22,6 +22,9 @@ WORKDIR /app
 
 COPY --from=builder /rpcgofer /app/rpcgofer
 
+# Create plugins directory (can be overridden by volume mount)
+RUN mkdir -p /app/plugins
+
 EXPOSE 8545 8546
 
 ENTRYPOINT ["/app/rpcgofer"]

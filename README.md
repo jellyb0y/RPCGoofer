@@ -7,22 +7,13 @@ High-performance JSON-RPC proxy for Ethereum-compatible blockchain nodes with bu
 - **Load Balancing**: Weighted round-robin distribution across multiple upstream nodes
 - **Automatic Failover**: Seamless switching to fallback nodes when primary nodes fail
 - **Smart Caching**: In-memory LRU cache with TTL for immutable blockchain data
+- **JavaScript Plugins**: Custom RPC methods via JS plugins for complex blockchain operations
 - **WebSocket Subscriptions**: Full support for `eth_subscribe` with event deduplication
 - **Shared Subscriptions**: Connection multiplexing - only M upstream connections regardless of client count
 - **Health Monitoring**: Real-time block-based health checks with configurable lag threshold
 - **Batch Requests**: Native support for JSON-RPC batch processing
 - **Retry Logic**: Configurable automatic retries with intelligent error classification
 - **Multi-Chain Support**: Configure multiple blockchain networks in a single instance
-
-### Shared Subscriptions
-
-RPCGofer optimizes WebSocket connections through shared subscriptions. Instead of creating N x M connections (N clients x M upstreams), it maintains only M connections per subscription type:
-
-```
-100 clients subscribed to newHeads + 3 upstreams = 3 connections (not 300)
-```
-
-Events are deduplicated at the shared subscription level and fanned out to all subscribers, including both clients and internal components (health monitoring).
 
 ## Quick Start
 
@@ -33,6 +24,7 @@ Events are deduplicated at the shared subscription level and fanned out to all s
 docker pull jellyb0y/rpcgofer:latest
 
 # Create config.json file (see Configuration Example below)
+# Create plugins directory with your custom plugins (optional)
 
 # Run container
 docker run -d \
@@ -40,6 +32,7 @@ docker run -d \
   -p 8545:8545 \
   -p 8546:8546 \
   -v $(pwd)/config.json:/app/config.json:ro \
+  -v $(pwd)/plugins:/app/plugins:ro \
   jellyb0y/rpcgofer:latest
 ```
 
@@ -81,6 +74,11 @@ go build -o rpcgofer ./cmd/rpcgofer
     "enabled": true,
     "ttl": 300,
     "size": 10000
+  },
+  "plugins": {
+    "enabled": true,
+    "directory": "./plugins",
+    "timeout": 30000
   },
   "groups": [
     {
@@ -150,6 +148,7 @@ See the [docs](./docs) folder for detailed documentation:
 - [Health Monitoring](./docs/health-monitoring.md)
 - [Caching System](./docs/caching.md)
 - [WebSocket Subscriptions](./docs/subscriptions.md)
+- [Plugins](./docs/plugins.md)
 - [Deployment](./docs/deployment.md)
 
 ## License

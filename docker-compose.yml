@@ -13,6 +13,7 @@ services:
       - "8546:8546"
     volumes:
       - ./config.json:/app/config.json:ro
+      - ./plugins:/app/plugins:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8545"]
       interval: 30s

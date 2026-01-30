@@ -10,23 +10,26 @@ import (
 	"rpcgofer/internal/cache"
 	"rpcgofer/internal/config"
 	"rpcgofer/internal/jsonrpc"
+	"rpcgofer/internal/plugin"
 	"rpcgofer/internal/upstream"
 )
 
 // Handler handles HTTP JSON-RPC requests
 type Handler struct {
-	router      *Router
-	cache       cache.Cache
-	retryConfig RetryConfig
-	maxBodySize int64
-	logger      zerolog.Logger
+	router        *Router
+	cache         cache.Cache
+	pluginManager *plugin.PluginManager
+	retryConfig   RetryConfig
+	maxBodySize   int64
+	logger        zerolog.Logger
 }
 
 // NewHandler creates a new Handler
-func NewHandler(router *Router, rpcCache cache.Cache, cfg *config.Config, logger zerolog.Logger) *Handler {
+func NewHandler(router *Router, rpcCache cache.Cache, pluginMgr *plugin.PluginManager, cfg *config.Config, logger zerolog.Logger) *Handler {
 	return &Handler{
-		router: router,
-		cache:  rpcCache,
+		router:        router,
+		cache:         rpcCache,
+		pluginManager: pluginMgr,
 		retryConfig: RetryConfig{
 			Enabled:     cfg.RetryEnabled,
 			MaxAttempts: cfg.RetryMaxAttempts,
@@ -107,6 +110,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // executeWithCache executes a single request with caching support
 func (h *Handler) executeWithCache(ctx context.Context, pool *upstream.Pool, groupName string, req *jsonrpc.Request) *jsonrpc.Response {
+	// Check if this method is handled by a plugin
+	if h.pluginManager != nil && h.pluginManager.HasPlugin(req.Method) {
+		caller := plugin.NewPoolCaller(ctx, pool, plugin.RetryConfig{
+			Enabled:     h.retryConfig.Enabled,
+			MaxAttempts: h.retryConfig.MaxAttempts,
+		}, h.logger)
+		h.logger.Debug().
+			Str("method", req.Method).
+			Msg("executing plugin")
+		return h.pluginManager.Execute(ctx, req.Method, req.ID, req.Params, caller)
+	}
+
 	// Check cache first
 	if cache.IsCacheable(req.Method, req.Params) {
 		cacheKey := cache.GenerateCacheKey(groupName, req.Method, req.Params)
@@ -152,8 +167,21 @@ func (h *Handler) executeBatchWithCache(ctx context.Context, pool *upstream.Pool
 	uncachedIndices := make([]int, 0, len(requests))
 	uncachedRequests := make([]*jsonrpc.Request, 0, len(requests))
 
-	// Check cache for each request
+	// Check cache and plugins for each request
 	for i, req := range requests {
+		// Check if this method is handled by a plugin
+		if h.pluginManager != nil && h.pluginManager.HasPlugin(req.Method) {
+			caller := plugin.NewPoolCaller(ctx, pool, plugin.RetryConfig{
+				Enabled:     h.retryConfig.Enabled,
+				MaxAttempts: h.retryConfig.MaxAttempts,
+			}, h.logger)
+			h.logger.Debug().
+				Str("method", req.Method).
+				Msg("executing plugin (batch)")
+			responses[i] = h.pluginManager.Execute(ctx, req.Method, req.ID, req.Params, caller)
+			continue
+		}
+
 		if cache.IsCacheable(req.Method, req.Params) {
 			cacheKey := cache.GenerateCacheKey(groupName, req.Method, req.Params)
 			if cachedData, found := h.cache.Get(cacheKey); found {

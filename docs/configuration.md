@@ -29,6 +29,11 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
     "size": 10000,
     "disabledMethods": []
   },
+  "plugins": {
+    "enabled": true,
+    "directory": "./plugins",
+    "timeout": 30000
+  },
   "groups": [
     {
       "name": "ethereum",
@@ -99,6 +104,20 @@ These settings control automatic reconnection behavior for upstream WebSocket co
 | `cache.size` | int | - | Maximum cache entries (required if enabled) |
 | `cache.disabledMethods` | []string | `[]` | Methods to exclude from caching |
 
+## Plugins Configuration
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `plugins.enabled` | bool | `false` | Enable JavaScript plugins |
+| `plugins.directory` | string | `"./plugins"` | Path to plugins directory |
+| `plugins.timeout` | int | `30000` | Plugin execution timeout in milliseconds |
+
+The `directory` path is relative to the working directory where RPCGofer is started:
+- **Binary**: Relative to current working directory or use absolute path
+- **Docker**: Working directory is `/app`, use `"/app/plugins"` and mount the volume
+
+See [Plugins Documentation](./plugins.md) for details on writing and configuring plugins.
+
 ## Groups Configuration
 
 Groups define collections of upstream nodes for different blockchain networks.
@@ -160,6 +179,11 @@ At least one of `rpcUrl` or `wsUrl` is required per upstream.
     "ttl": 300,
     "size": 50000,
     "disabledMethods": []
+  },
+  "plugins": {
+    "enabled": true,
+    "directory": "/app/plugins",
+    "timeout": 30000
   },
   "groups": [
     {
