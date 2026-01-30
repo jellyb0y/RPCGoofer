@@ -184,9 +184,9 @@ func (c *Client) handleSingle(ctx context.Context, req *jsonrpc.Request) {
 		return
 	}
 
-	// Check if this method is handled by a plugin (no retries for plugin upstream calls)
+	// Check if this method is handled by a plugin
 	if c.pluginManager != nil && c.pluginManager.HasPlugin(req.Method) {
-		caller := plugin.NewPoolCaller(ctx, c.pool, plugin.RetryConfig{Enabled: false}, c.logger)
+		caller := plugin.NewPoolCaller(ctx, c.pool, plugin.RetryConfig{Enabled: c.retryConfig.Enabled, MaxAttempts: c.retryConfig.MaxAttempts}, c.logger)
 		c.logger.Debug().
 			Str("method", req.Method).
 			Msg("executing plugin (ws)")
@@ -281,9 +281,9 @@ func (c *Client) handleBatch(ctx context.Context, requests []*jsonrpc.Request) {
 				continue
 			}
 
-			// Check if this method is handled by a plugin (no retries for plugin upstream calls)
+			// Check if this method is handled by a plugin
 			if c.pluginManager != nil && c.pluginManager.HasPlugin(req.Method) {
-				caller := plugin.NewPoolCaller(ctx, c.pool, plugin.RetryConfig{Enabled: false}, c.logger)
+				caller := plugin.NewPoolCaller(ctx, c.pool, plugin.RetryConfig{Enabled: c.retryConfig.Enabled, MaxAttempts: c.retryConfig.MaxAttempts}, c.logger)
 				c.logger.Debug().
 					Str("method", req.Method).
 					Msg("executing plugin (ws batch)")
