@@ -100,6 +100,19 @@ func applyDefaults(cfg *Config) {
 			cfg.Plugins.Timeout = DefaultPluginTimeout
 		}
 	}
+
+	// Apply defaults to batching methods
+	if cfg.Batching != nil && cfg.Batching.Enabled {
+		for method, methodCfg := range cfg.Batching.Methods {
+			if methodCfg.MaxSize == 0 {
+				methodCfg.MaxSize = DefaultBatchMaxSize
+			}
+			if methodCfg.MaxWait == 0 {
+				methodCfg.MaxWait = DefaultBatchMaxWait
+			}
+			cfg.Batching.Methods[method] = methodCfg
+		}
+	}
 }
 
 // validate checks the configuration for errors
@@ -203,6 +216,21 @@ func validate(cfg *Config) error {
 	if cfg.Plugins != nil && cfg.Plugins.Enabled {
 		if cfg.Plugins.Timeout < 0 {
 			return fmt.Errorf("plugins.timeout must be non-negative")
+		}
+	}
+
+	// Validate batching config if provided
+	if cfg.Batching != nil && cfg.Batching.Enabled {
+		for method, methodCfg := range cfg.Batching.Methods {
+			if methodCfg.MaxSize <= 0 {
+				return fmt.Errorf("batching.methods[%s].maxSize must be positive", method)
+			}
+			if methodCfg.MaxWait <= 0 {
+				return fmt.Errorf("batching.methods[%s].maxWait must be positive", method)
+			}
+			if methodCfg.AggregateParam < 0 {
+				return fmt.Errorf("batching.methods[%s].aggregateParam must be non-negative", method)
+			}
 		}
 	}
 

@@ -84,6 +84,13 @@ func SetDisabledMethods(methods []string) {
 	}
 }
 
+// AddDisabledMethods adds methods to the disabled list
+func AddDisabledMethods(methods []string) {
+	for _, method := range methods {
+		disabledMethods[method] = true
+	}
+}
+
 // IsMethodDisabled checks if a method is in the disabled list
 func IsMethodDisabled(method string) bool {
 	return disabledMethods[method]

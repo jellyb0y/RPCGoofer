@@ -19,6 +19,16 @@
     "directory": "/app/plugins",
     "timeout": 30000
   },
+  "batching": {
+    "enabled": true,
+    "methods": {
+      "custom_isContract": {
+        "maxSize": 100,
+        "maxWait": 500,
+        "aggregateParam": 0
+      }
+    }
+  },
   "groups": [
     {
       "name": "ethereum",

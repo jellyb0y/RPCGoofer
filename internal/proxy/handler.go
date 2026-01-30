@@ -7,6 +7,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"rpcgofer/internal/batcher"
 	"rpcgofer/internal/cache"
 	"rpcgofer/internal/config"
 	"rpcgofer/internal/jsonrpc"
@@ -16,20 +17,22 @@ import (
 
 // Handler handles HTTP JSON-RPC requests
 type Handler struct {
-	router        *Router
-	cache         cache.Cache
-	pluginManager *plugin.PluginManager
-	retryConfig   RetryConfig
-	maxBodySize   int64
-	logger        zerolog.Logger
+	router          *Router
+	cache           cache.Cache
+	pluginManager   *plugin.PluginManager
+	batchAggregator *batcher.Aggregator
+	retryConfig     RetryConfig
+	maxBodySize     int64
+	logger          zerolog.Logger
 }
 
 // NewHandler creates a new Handler
-func NewHandler(router *Router, rpcCache cache.Cache, pluginMgr *plugin.PluginManager, cfg *config.Config, logger zerolog.Logger) *Handler {
+func NewHandler(router *Router, rpcCache cache.Cache, pluginMgr *plugin.PluginManager, batchAgg *batcher.Aggregator, cfg *config.Config, logger zerolog.Logger) *Handler {
 	return &Handler{
-		router:        router,
-		cache:         rpcCache,
-		pluginManager: pluginMgr,
+		router:          router,
+		cache:           rpcCache,
+		pluginManager:   pluginMgr,
+		batchAggregator: batchAgg,
 		retryConfig: RetryConfig{
 			Enabled:     cfg.RetryEnabled,
 			MaxAttempts: cfg.RetryMaxAttempts,
@@ -110,6 +113,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // executeWithCache executes a single request with caching support
 func (h *Handler) executeWithCache(ctx context.Context, pool *upstream.Pool, groupName string, req *jsonrpc.Request) *jsonrpc.Response {
+	// Check if this method supports batching (before plugins and cache)
+	if h.batchAggregator != nil && h.batchAggregator.GetConfig(req.Method) != nil {
+		h.logger.Debug().
+			Str("method", req.Method).
+			Msg("adding to batch")
+		responseChan := h.batchAggregator.Add(ctx, groupName, req)
+		return <-responseChan
+	}
+
 	// Check if this method is handled by a plugin
 	if h.pluginManager != nil && h.pluginManager.HasPlugin(req.Method) {
 		caller := plugin.NewPoolCaller(ctx, pool, plugin.RetryConfig{
@@ -167,8 +179,18 @@ func (h *Handler) executeBatchWithCache(ctx context.Context, pool *upstream.Pool
 	uncachedIndices := make([]int, 0, len(requests))
 	uncachedRequests := make([]*jsonrpc.Request, 0, len(requests))
 
-	// Check cache and plugins for each request
+	// Check batching, cache and plugins for each request
 	for i, req := range requests {
+		// Check if this method supports batching
+		if h.batchAggregator != nil && h.batchAggregator.GetConfig(req.Method) != nil {
+			h.logger.Debug().
+				Str("method", req.Method).
+				Msg("adding to batch (batch request)")
+			responseChan := h.batchAggregator.Add(ctx, groupName, req)
+			responses[i] = <-responseChan
+			continue
+		}
+
 		// Check if this method is handled by a plugin
 		if h.pluginManager != nil && h.pluginManager.HasPlugin(req.Method) {
 			caller := plugin.NewPoolCaller(ctx, pool, plugin.RetryConfig{
@@ -277,4 +299,39 @@ func (h *Handler) writeBatchError(w http.ResponseWriter, requests []*jsonrpc.Req
 // writeError writes a plain HTTP error
 func (h *Handler) writeError(w http.ResponseWriter, status int, message string) {
 	http.Error(w, message, status)
+}
+
+// HandlerExecutor wraps Handler to implement batcher.BatchExecutor
+type HandlerExecutor struct {
+	handler *Handler
+}
+
+// NewHandlerExecutor creates a new HandlerExecutor
+func NewHandlerExecutor(h *Handler) *HandlerExecutor {
+	return &HandlerExecutor{handler: h}
+}
+
+// ExecuteBatch executes a batched request (bypasses batching to avoid recursion)
+func (e *HandlerExecutor) ExecuteBatch(ctx context.Context, groupName string, req *jsonrpc.Request) *jsonrpc.Response {
+	pool, err := e.handler.router.GetPool(groupName)
+	if err != nil {
+		return jsonrpc.NewErrorResponse(req.ID, jsonrpc.NewError(jsonrpc.CodeInternalError, err.Error()))
+	}
+
+	// Check if this method is handled by a plugin
+	if e.handler.pluginManager != nil && e.handler.pluginManager.HasPlugin(req.Method) {
+		caller := plugin.NewPoolCaller(ctx, pool, plugin.RetryConfig{
+			Enabled:     e.handler.retryConfig.Enabled,
+			MaxAttempts: e.handler.retryConfig.MaxAttempts,
+		}, e.handler.logger)
+		return e.handler.pluginManager.Execute(ctx, req.Method, req.ID, req.Params, caller)
+	}
+
+	// Execute directly on upstream (no batching, no caching)
+	resp, err := ExecuteWithPool(ctx, pool, req, e.handler.retryConfig, e.handler.logger)
+	if err != nil {
+		return jsonrpc.NewErrorResponse(req.ID, jsonrpc.NewError(jsonrpc.CodeInternalError, "all upstreams failed"))
+	}
+
+	return resp
 }

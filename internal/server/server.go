@@ -8,6 +8,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"rpcgofer/internal/batcher"
 	"rpcgofer/internal/cache"
 	"rpcgofer/internal/config"
 	"rpcgofer/internal/plugin"
@@ -23,6 +24,7 @@ type Server struct {
 	router           *proxy.Router
 	cache            cache.Cache
 	pluginManager    *plugin.PluginManager
+	batchAggregator  *batcher.Aggregator
 	subManager       *subscription.Manager
 	sharedSubMgrs    map[string]*subscription.SharedSubscriptionManager // pool name -> shared sub manager
 	rpcServer        *http.Server
@@ -85,19 +87,36 @@ func New(cfg *config.Config, logger zerolog.Logger) (*Server, error) {
 		logger.Info().Msg("plugins disabled")
 	}
 
+	// Create batch aggregator based on config
+	var batchAgg *batcher.Aggregator
+	if cfg.IsBatchingEnabled() {
+		batchAgg = batcher.NewAggregator(cfg.Batching, logger)
+		methods := batchAgg.GetMethods()
+
+		// Disable caching for batched methods
+		cache.AddDisabledMethods(methods)
+
+		logger.Info().
+			Strs("methods", methods).
+			Msg("batching enabled")
+	} else {
+		logger.Info().Msg("batching disabled")
+	}
+
 	sharedSubMgrs := make(map[string]*subscription.SharedSubscriptionManager)
 
 	// Create subscription manager (will receive shared sub managers later)
 	subManager := subscription.NewManager(cfg, sharedSubMgrs, logger)
 
 	return &Server{
-		cfg:           cfg,
-		router:        router,
-		cache:         rpcCache,
-		pluginManager: pluginMgr,
-		subManager:    subManager,
-		sharedSubMgrs: sharedSubMgrs,
-		logger:        logger,
+		cfg:             cfg,
+		router:          router,
+		cache:           rpcCache,
+		pluginManager:   pluginMgr,
+		batchAggregator: batchAgg,
+		subManager:      subManager,
+		sharedSubMgrs:   sharedSubMgrs,
+		logger:          logger,
 	}, nil
 }
 
@@ -132,7 +151,12 @@ func (s *Server) Start() error {
 	s.router.StartAll()
 
 	// Create HTTP RPC handler
-	rpcHandler := proxy.NewHandler(s.router, s.cache, s.pluginManager, s.cfg, s.logger)
+	rpcHandler := proxy.NewHandler(s.router, s.cache, s.pluginManager, s.batchAggregator, s.cfg, s.logger)
+
+	// Set batch executor if batching is enabled
+	if s.batchAggregator != nil {
+		s.batchAggregator.SetExecutor(proxy.NewHandlerExecutor(rpcHandler))
+	}
 
 	// Create WebSocket handler
 	wsHandler := ws.NewHandler(s.router, s.cache, s.subManager, s.cfg, s.logger)
@@ -212,6 +236,11 @@ func (s *Server) Stop(ctx context.Context) error {
 	for name, mgr := range s.sharedSubMgrs {
 		mgr.Close()
 		s.logger.Debug().Str("group", name).Msg("closed shared subscription manager")
+	}
+
+	// Close batch aggregator
+	if s.batchAggregator != nil {
+		s.batchAggregator.Close(ctx)
 	}
 
 	// Close plugin manager

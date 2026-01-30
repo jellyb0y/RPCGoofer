@@ -29,9 +29,10 @@ type Config struct {
 	MaxSubscriptionsPerClient int           `json:"maxSubscriptionsPerClient"`
 	RetryEnabled              bool           `json:"retryEnabled"`
 	RetryMaxAttempts          int            `json:"retryMaxAttempts"`
-	Cache                     *CacheConfig   `json:"cache,omitempty"`
-	Plugins                   *PluginConfig  `json:"plugins,omitempty"`
-	Groups                    []GroupConfig  `json:"groups"`
+	Cache                     *CacheConfig    `json:"cache,omitempty"`
+	Plugins                   *PluginConfig   `json:"plugins,omitempty"`
+	Batching                  *BatchingConfig `json:"batching,omitempty"`
+	Groups                    []GroupConfig   `json:"groups"`
 }
 
 // CacheConfig represents cache configuration
@@ -47,6 +48,19 @@ type PluginConfig struct {
 	Enabled   bool   `json:"enabled"`
 	Directory string `json:"directory"` // path to plugins directory
 	Timeout   int    `json:"timeout"`   // execution timeout in milliseconds
+}
+
+// BatchingConfig represents request batching configuration
+type BatchingConfig struct {
+	Enabled bool                          `json:"enabled"`
+	Methods map[string]BatchMethodConfig  `json:"methods"`
+}
+
+// BatchMethodConfig represents batching configuration for a specific method
+type BatchMethodConfig struct {
+	MaxSize        int `json:"maxSize"`        // maximum batch size
+	MaxWait        int `json:"maxWait"`        // maximum wait time in milliseconds
+	AggregateParam int `json:"aggregateParam"` // index of the parameter to aggregate
 }
 
 // GroupConfig represents a group of upstreams
@@ -87,6 +101,8 @@ const (
 	DefaultUpstreamRole              = RoleMain
 	DefaultPluginDirectory           = "./plugins"
 	DefaultPluginTimeout             = 30000 // ms - default plugin execution timeout
+	DefaultBatchMaxSize              = 100   // default maximum batch size
+	DefaultBatchMaxWait              = 500   // ms - default maximum wait time for batching
 )
 
 // GetRequestTimeoutDuration returns request timeout as time.Duration
@@ -153,4 +169,29 @@ func (c *Config) GetPluginTimeoutDuration() time.Duration {
 // GetCacheTTLDuration returns cache TTL as time.Duration
 func (c *CacheConfig) GetTTLDuration() time.Duration {
 	return time.Duration(c.TTL) * time.Second
+}
+
+// IsBatchingEnabled returns true if batching is configured and enabled
+func (c *Config) IsBatchingEnabled() bool {
+	return c.Batching != nil && c.Batching.Enabled && len(c.Batching.Methods) > 0
+}
+
+// GetBatchingMethods returns the list of methods with batching enabled
+func (c *Config) GetBatchingMethods() []string {
+	if c.Batching == nil {
+		return nil
+	}
+	methods := make([]string, 0, len(c.Batching.Methods))
+	for method := range c.Batching.Methods {
+		methods = append(methods, method)
+	}
+	return methods
+}
+
+// GetMaxWaitDuration returns max wait time as time.Duration
+func (c *BatchMethodConfig) GetMaxWaitDuration() time.Duration {
+	if c.MaxWait == 0 {
+		return time.Duration(DefaultBatchMaxWait) * time.Millisecond
+	}
+	return time.Duration(c.MaxWait) * time.Millisecond
 }

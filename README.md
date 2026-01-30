@@ -8,6 +8,7 @@ High-performance JSON-RPC proxy for Ethereum-compatible blockchain nodes with bu
 - **Automatic Failover**: Seamless switching to fallback nodes when primary nodes fail
 - **Smart Caching**: In-memory LRU cache with TTL for immutable blockchain data
 - **JavaScript Plugins**: Custom RPC methods via JS plugins for complex blockchain operations
+- **Request Batching**: Automatic request coalescing to reduce RPC costs
 - **WebSocket Subscriptions**: Full support for `eth_subscribe` with event deduplication
 - **Shared Subscriptions**: Connection multiplexing - only M upstream connections regardless of client count
 - **Health Monitoring**: Real-time block-based health checks with configurable lag threshold
@@ -80,6 +81,16 @@ go build -o rpcgofer ./cmd/rpcgofer
     "directory": "./plugins",
     "timeout": 30000
   },
+  "batching": {
+    "enabled": true,
+    "methods": {
+      "custom_isContract": {
+        "maxSize": 100,
+        "maxWait": 500,
+        "aggregateParam": 0
+      }
+    }
+  },
   "groups": [
     {
       "name": "ethereum",
@@ -149,6 +160,7 @@ See the [docs](./docs) folder for detailed documentation:
 - [Caching System](./docs/caching.md)
 - [WebSocket Subscriptions](./docs/subscriptions.md)
 - [Plugins](./docs/plugins.md)
+- [Request Batching](./docs/batching.md)
 - [Deployment](./docs/deployment.md)
 
 ## License

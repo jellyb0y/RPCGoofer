@@ -34,6 +34,16 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
     "directory": "./plugins",
     "timeout": 30000
   },
+  "batching": {
+    "enabled": true,
+    "methods": {
+      "custom_isContract": {
+        "maxSize": 100,
+        "maxWait": 500,
+        "aggregateParam": 0
+      }
+    }
+  },
   "groups": [
     {
       "name": "ethereum",
@@ -117,6 +127,20 @@ The `directory` path is relative to the working directory where RPCGofer is star
 - **Docker**: Working directory is `/app`, use `"/app/plugins"` and mount the volume
 
 See [Plugins Documentation](./plugins.md) for details on writing and configuring plugins.
+
+## Batching Configuration
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `batching.enabled` | bool | `false` | Enable request batching |
+| `batching.methods` | object | - | Map of method names to batching configuration |
+| `batching.methods[].maxSize` | int | `100` | Maximum number of elements in a batch |
+| `batching.methods[].maxWait` | int | `500` | Maximum wait time in milliseconds |
+| `batching.methods[].aggregateParam` | int | - | Index of the parameter to aggregate |
+
+Batched methods are automatically excluded from caching. The method must accept an array parameter and return an array of the same size.
+
+See [Batching Documentation](./batching.md) for details on request coalescing.
 
 ## Groups Configuration
 
