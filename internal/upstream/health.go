@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
 
 	"rpcgofer/internal/jsonrpc"
@@ -18,12 +17,15 @@ import (
 // HealthMonitor monitors the health of upstreams in a group
 type HealthMonitor struct {
 	upstreams          []*Upstream
+	upstreamsByName    map[string]*Upstream
 	blockLagThreshold  uint64
 	lagRecoveryTimeout time.Duration
 	checkInterval      time.Duration
 	statusLogInterval  time.Duration
 	statsLogInterval   time.Duration
 	logger             zerolog.Logger
+
+	newHeadsProvider NewHeadsProvider
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -37,8 +39,15 @@ type HealthMonitor struct {
 func NewHealthMonitor(upstreams []*Upstream, blockLagThreshold uint64, lagRecoveryTimeout time.Duration, checkInterval time.Duration, statusLogInterval time.Duration, statsLogInterval time.Duration, logger zerolog.Logger) *HealthMonitor {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Build upstream name lookup map
+	upstreamsByName := make(map[string]*Upstream, len(upstreams))
+	for _, u := range upstreams {
+		upstreamsByName[u.Name()] = u
+	}
+
 	return &HealthMonitor{
 		upstreams:          upstreams,
+		upstreamsByName:    upstreamsByName,
 		blockLagThreshold:  blockLagThreshold,
 		lagRecoveryTimeout: lagRecoveryTimeout,
 		checkInterval:      checkInterval,
@@ -50,15 +59,86 @@ func NewHealthMonitor(upstreams []*Upstream, blockLagThreshold uint64, lagRecove
 	}
 }
 
+// SetNewHeadsProvider sets the provider for newHeads events
+func (hm *HealthMonitor) SetNewHeadsProvider(provider NewHeadsProvider) {
+	hm.newHeadsProvider = provider
+}
+
+// ID implements NewHeadsSubscriber interface
+func (hm *HealthMonitor) ID() string {
+	return "health-monitor"
+}
+
+// OnBlock implements NewHeadsSubscriber interface
+func (hm *HealthMonitor) OnBlock(upstreamName string, result json.RawMessage) {
+	u, ok := hm.upstreamsByName[upstreamName]
+	if !ok {
+		hm.logger.Warn().Str("upstream", upstreamName).Msg("received block from unknown upstream")
+		return
+	}
+
+	var header jsonrpc.BlockHeader
+	if err := json.Unmarshal(result, &header); err != nil {
+		hm.logger.Warn().Err(err).Msg("failed to parse block header")
+		return
+	}
+
+	blockNum, err := parseHexUint64(header.Number)
+	if err != nil {
+		hm.logger.Warn().Err(err).Str("number", header.Number).Msg("failed to parse block number")
+		return
+	}
+
+	u.UpdateBlock(blockNum)
+	u.SetHealthy(true)
+	isNewMax := hm.updateMaxBlock(blockNum)
+
+	if isNewMax {
+		// New max block - give other upstreams time to catch up
+		hm.scheduleLagCheck(blockNum)
+	}
+
+	// Check if this upstream caught up
+	hm.checkUpstreamCaughtUp(u)
+
+	hm.logger.Debug().
+		Str("upstream", u.Name()).
+		Uint64("block", blockNum).
+		Str("hash", header.Hash).
+		Msg("new block from shared subscription")
+}
+
 // Start begins health monitoring
 func (hm *HealthMonitor) Start() {
-	for _, u := range hm.upstreams {
-		if u.HasWS() {
-			hm.wg.Add(1)
-			go hm.monitorWithWS(u)
-		} else if u.HasRPC() {
-			hm.wg.Add(1)
-			go hm.monitorWithPolling(u)
+	// If we have a shared subscription provider, use it for newHeads
+	if hm.newHeadsProvider != nil {
+		// Subscribe to newHeads through the shared subscription manager
+		if err := hm.newHeadsProvider.SubscribeNewHeads(hm.ctx, hm); err != nil {
+			hm.logger.Warn().Err(err).Msg("failed to subscribe to newHeads via shared subscription, falling back to polling")
+			// Fall back to polling for all upstreams
+			for _, u := range hm.upstreams {
+				if u.HasRPC() {
+					hm.wg.Add(1)
+					go hm.monitorWithPolling(u)
+				}
+			}
+		} else {
+			hm.logger.Info().Msg("subscribed to newHeads via shared subscription manager")
+			// Only poll upstreams that don't have WebSocket
+			for _, u := range hm.upstreams {
+				if !u.HasWS() && u.HasRPC() {
+					hm.wg.Add(1)
+					go hm.monitorWithPolling(u)
+				}
+			}
+		}
+	} else {
+		// No shared subscription provider - poll all upstreams
+		for _, u := range hm.upstreams {
+			if u.HasRPC() {
+				hm.wg.Add(1)
+				go hm.monitorWithPolling(u)
+			}
 		}
 	}
 
@@ -173,127 +253,15 @@ func (hm *HealthMonitor) logCurrentRequestStats() {
 
 // Stop stops health monitoring
 func (hm *HealthMonitor) Stop() {
+	// Unsubscribe from shared subscription if we have a provider
+	if hm.newHeadsProvider != nil {
+		if err := hm.newHeadsProvider.UnsubscribeNewHeads(hm.ID()); err != nil {
+			hm.logger.Warn().Err(err).Msg("failed to unsubscribe from newHeads")
+		}
+	}
+
 	hm.cancel()
 	hm.wg.Wait()
-}
-
-// monitorWithWS monitors an upstream using WebSocket subscription to newHeads
-func (hm *HealthMonitor) monitorWithWS(u *Upstream) {
-	defer hm.wg.Done()
-
-	for {
-		select {
-		case <-hm.ctx.Done():
-			return
-		default:
-		}
-
-		if err := hm.subscribeNewHeads(u); err != nil {
-			hm.logger.Warn().Err(err).Str("upstream", u.Name()).Msg("newHeads subscription failed, reconnecting...")
-			u.SetHealthy(false)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-	}
-}
-
-// subscribeNewHeads subscribes to newHeads and processes blocks
-func (hm *HealthMonitor) subscribeNewHeads(u *Upstream) error {
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-	}
-
-	conn, _, err := dialer.DialContext(hm.ctx, u.WSURL(), nil)
-	if err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
-	}
-	defer conn.Close()
-
-	// Subscribe to newHeads
-	subReq, err := jsonrpc.NewRequest("eth_subscribe", []string{"newHeads"}, jsonrpc.NewIDInt(1))
-	if err != nil {
-		return fmt.Errorf("failed to create subscribe request: %w", err)
-	}
-
-	reqBytes, err := subReq.Bytes()
-	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	if err := conn.WriteMessage(websocket.TextMessage, reqBytes); err != nil {
-		return fmt.Errorf("failed to send subscribe request: %w", err)
-	}
-
-	// Read subscription response
-	_, respData, err := conn.ReadMessage()
-	if err != nil {
-		return fmt.Errorf("failed to read subscribe response: %w", err)
-	}
-
-	var subResp jsonrpc.Response
-	if err := json.Unmarshal(respData, &subResp); err != nil {
-		return fmt.Errorf("failed to parse subscribe response: %w", err)
-	}
-
-	if subResp.HasError() {
-		return fmt.Errorf("subscribe error: %s", subResp.Error.Message)
-	}
-
-	hm.logger.Debug().Str("upstream", u.Name()).Msg("subscribed to newHeads")
-	u.SetHealthy(true)
-
-	// Read newHeads notifications
-	for {
-		select {
-		case <-hm.ctx.Done():
-			return nil
-		default:
-		}
-
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			return fmt.Errorf("failed to read message: %w", err)
-		}
-
-		var notification jsonrpc.SubscriptionNotification
-		if err := json.Unmarshal(data, &notification); err != nil {
-			continue // Not a notification, skip
-		}
-
-		if notification.Method != "eth_subscription" {
-			continue
-		}
-
-		var header jsonrpc.BlockHeader
-		if err := json.Unmarshal(notification.Params.Result, &header); err != nil {
-			hm.logger.Warn().Err(err).Msg("failed to parse block header")
-			continue
-		}
-
-		blockNum, err := parseHexUint64(header.Number)
-		if err != nil {
-			hm.logger.Warn().Err(err).Str("number", header.Number).Msg("failed to parse block number")
-			continue
-		}
-
-		u.UpdateBlock(blockNum)
-		isNewMax := hm.updateMaxBlock(blockNum)
-
-		if isNewMax {
-			// New max block - give other upstreams time to catch up
-			hm.scheduleLagCheck(blockNum)
-		}
-
-		// Check if this upstream caught up
-		hm.checkUpstreamCaughtUp(u)
-
-		hm.logger.Debug().
-			Str("upstream", u.Name()).
-			Uint64("block", blockNum).
-			Str("hash", header.Hash).
-			Msg("new block")
-	}
 }
 
 // monitorWithPolling monitors an upstream using periodic eth_blockNumber calls

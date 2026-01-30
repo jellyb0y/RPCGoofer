@@ -150,15 +150,13 @@ RPCGofer subscribes to multiple upstreams simultaneously for increased reliabili
 1. Client subscribes to newHeads
 2. RPCGofer:
    a. Generates client subscription ID
-   b. For each healthy upstream with WebSocket:
-      - Connect to upstream
-      - Subscribe to newHeads
-      - Store upstream subscription ID
-   c. Returns client subscription ID
+   b. Subscribes client to SharedSubscription (creates one if needed)
+   c. SharedSubscription maintains connections to all upstreams
+   d. Returns client subscription ID
 3. Events from any upstream:
-   a. Received by corresponding reader goroutine
-   b. Checked for duplicates
-   c. If unique: forwarded to client with client's subscription ID
+   a. Received by SharedSubscription
+   b. Checked for duplicates (before fan-out)
+   c. If unique: broadcast to all subscribers (clients + health monitor)
 ```
 
 ### Benefits
@@ -166,6 +164,73 @@ RPCGofer subscribes to multiple upstreams simultaneously for increased reliabili
 - **Redundancy**: Events delivered even if one upstream fails
 - **Lower latency**: First event from any upstream is delivered
 - **Automatic failover**: Continues working if upstreams disconnect
+
+## Shared Subscriptions (Connection Multiplexing)
+
+RPCGofer uses shared subscriptions to optimize WebSocket connections to upstreams. Instead of creating separate connections for each client, connections are shared among all clients with the same subscription type.
+
+### Architecture
+
+```
+Without Shared Subscriptions (N clients x M upstreams connections):
+
+  Client 1 ─────┬──> Upstream 1
+               └──> Upstream 2
+  Client 2 ─────┬──> Upstream 1
+               └──> Upstream 2
+  Client 3 ─────┬──> Upstream 1
+               └──> Upstream 2
+
+  Total: 6 WebSocket connections
+
+With Shared Subscriptions (M connections, regardless of clients):
+
+  Client 1 ──┐
+  Client 2 ──┼──> SharedSubscription ───┬──> Upstream 1
+  Client 3 ──┘       (newHeads)         └──> Upstream 2
+
+  Total: 2 WebSocket connections
+```
+
+### How It Works
+
+1. **SharedSubscriptionManager** - central manager for all shared subscriptions per group
+2. **SharedSubscription** - one shared subscription per unique `(type, params)` combination
+3. **Subscribers** - both clients and internal components (like health monitor) subscribe to shared subscriptions
+
+### Subscription Key
+
+Subscriptions are grouped by type and parameters:
+
+| Type | Key Example |
+|------|-------------|
+| `newHeads` | `newHeads:` (no params) |
+| `logs` | `logs:a1b2c3d4` (hash of filter params) |
+| `newPendingTransactions` | `newPendingTransactions:` |
+
+### Benefits
+
+- **Connection Efficiency**: Only M connections to upstreams regardless of client count
+- **Resource Optimization**: Single deduplication cache per subscription type
+- **Unified Event Flow**: Health monitoring and client subscriptions use the same event stream
+- **Scalability**: Supports thousands of clients without proportional connection growth
+
+### Internal Integration
+
+The health monitoring system uses shared subscriptions for `newHeads`:
+
+```
+SharedSubscription (newHeads)
+├── HealthMonitor subscriber (updates block numbers, health status)
+├── Client 1 subscriber
+├── Client 2 subscriber
+└── ...
+```
+
+This means:
+- Health monitor receives the same deduplicated events as clients
+- No duplicate WebSocket connections for internal monitoring
+- Consistent view of blockchain state across all components
 
 ## Main/Fallback Synchronization for newHeads
 
@@ -234,7 +299,7 @@ DEBUG forwarded event to client upstream=fallback-node subID=0x123 type=newHeads
 
 ## Event Deduplication
 
-Since events are received from multiple upstreams, deduplication prevents duplicate events reaching the client.
+Since events are received from multiple upstreams, deduplication prevents duplicate events reaching subscribers.
 
 ### Configuration
 
@@ -255,12 +320,17 @@ Since events are received from multiple upstreams, deduplication prevents duplic
 ### Deduplication Flow
 
 ```
-1. Event received from upstream
+1. Event received from upstream by SharedSubscription
 2. Generate deduplication key
 3. Check LRU cache:
    - If key exists: discard event (duplicate)
-   - If key absent: add to cache, forward event
+   - If key absent: add to cache, broadcast to all subscribers
 ```
+
+Deduplication happens at the SharedSubscription level, before events are fanned out to subscribers. This ensures:
+- Each unique event is processed only once
+- All subscribers receive the same deduplicated stream
+- Efficient use of memory (single cache per subscription type)
 
 ## Subscription Limits
 
@@ -292,8 +362,7 @@ Prevents individual clients from creating too many subscriptions.
 ### Client Session
 
 Each WebSocket connection has an associated client session that tracks:
-- Active subscriptions
-- Deduplication cache
+- Active subscriptions (references to shared subscriptions)
 - Send function for events
 
 ### Session Lifecycle
@@ -301,11 +370,28 @@ Each WebSocket connection has an associated client session that tracks:
 ```
 1. WebSocket connection established
 2. Session created on first subscription
-3. Subscriptions managed within session
+3. For each subscription:
+   a. Client added as subscriber to SharedSubscription
+   b. SharedSubscription created if not exists
 4. On disconnect:
-   a. All subscriptions canceled
-   b. Upstream connections closed
+   a. Client removed from all SharedSubscriptions
+   b. Empty SharedSubscriptions cleaned up (connections closed)
    c. Session removed
+```
+
+### Shared Subscription Lifecycle
+
+```
+1. First subscriber requests subscription type
+2. SharedSubscription created:
+   a. Connects to all upstreams with WebSocket
+   b. Subscribes to events on each upstream
+   c. Starts event reading goroutines
+3. Additional subscribers join existing SharedSubscription
+4. When last subscriber leaves:
+   a. Unsubscribe from all upstreams
+   b. Close all WebSocket connections
+   c. Remove SharedSubscription
 ```
 
 ## Error Handling
