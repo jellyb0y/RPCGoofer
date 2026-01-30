@@ -30,7 +30,7 @@ func NewPool(groupCfg config.GroupConfig, globalCfg *config.Config, logger zerol
 	monitor := NewHealthMonitor(
 		upstreams,
 		globalCfg.BlockLagThreshold,
-		globalCfg.GetBlockTimeoutDuration(),
+		globalCfg.GetLagRecoveryTimeoutDuration(),
 		globalCfg.GetHealthCheckIntervalDuration(),
 		globalCfg.GetStatusLogIntervalDuration(),
 		globalCfg.GetStatsLogIntervalDuration(),

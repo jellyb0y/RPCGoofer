@@ -84,52 +84,59 @@ With `blockLagThreshold: 3`:
 
 ### Threshold Value of 0
 
-Setting `blockLagThreshold: 0` effectively disables lag-based health checks. Upstreams are only marked unhealthy if they fail to respond or exceed block timeout.
+Setting `blockLagThreshold: 0` effectively disables lag-based health checks. Upstreams are only marked unhealthy if they fail to respond or lose connection.
 
-## Block Timeout
+## Lag Recovery Timeout
 
-In addition to block lag, RPCGofer monitors how long since the last block was received from each upstream.
+When an upstream falls behind the maximum block, it is given a grace period to catch up before being marked unhealthy.
 
 ### Configuration
 
 ```json
 {
-  "blockTimeout": 30000
+  "lagRecoveryTimeout": 2000
 }
 ```
 
 ### How It Works
 
 ```
-1. Each time a new block is received, timestamp is recorded
-2. Periodic check runs (every blockTimeout/4, minimum 500ms)
-3. For each upstream:
-   - Calculate time since last block
-   - If exceeds blockTimeout: mark unhealthy
-4. When new block arrives: upstream can become healthy again
+1. When any upstream receives a new block that becomes the new maxBlock:
+   - A timer is scheduled for lagRecoveryTimeout duration
+   - This creates a "catch-up window" for other upstreams
+2. When the timer fires:
+   - All upstreams are checked against that specific block
+   - If lag > blockLagThreshold: mark unhealthy
+3. When any upstream receives a block:
+   - If its lag <= blockLagThreshold: mark healthy immediately
 ```
 
 ### Use Case
 
-Block timeout is particularly important for detecting "stuck" upstreams that:
-- Maintain WebSocket connection but stop sending blocks
-- Have network issues causing delayed block propagation
-- Are stuck on a fork or have consensus issues
+Lag recovery timeout ensures fair treatment of upstreams with slightly different block propagation times:
+- Prevents false-positive unhealthy status for temporarily lagging upstreams
+- Gives network propagation time to reach all providers
+- Handles brief desynchronization gracefully
 
 ### Examples
 
-With `blockTimeout: 30000` (30 seconds):
+With `blockLagThreshold: 1` and `lagRecoveryTimeout: 2000` (2 seconds):
 
-| Upstream | Last Block | Time Since | Status |
-|----------|------------|------------|--------|
-| A | 5s ago | 5000ms | Healthy |
-| B | 25s ago | 25000ms | Healthy |
-| C | 35s ago | 35000ms | Unhealthy |
+```
+Time 0ms:   Upstream A receives block 100 (new maxBlock)
+            -> Timer scheduled for block 100
+Time 500ms: Upstream B receives block 99 (lag=1, within threshold -> healthy)
+Time 1000ms: Upstream C still at block 98
+Time 2000ms: Timer fires for block 100
+            -> Check upstream C: lag=2 > threshold=1 -> unhealthy
+Time 2500ms: Upstream C receives block 100 (lag=0 -> healthy again)
+```
 
 ### Logging
 
 ```
-WARN upstream block timeout, marking unhealthy upstream=nodeC timeSinceBlock=35s timeout=30s
+WARN upstream did not catch up in time, marking unhealthy upstream=nodeC currentBlock=98 targetBlock=100 lag=2
+INFO upstream caught up, marking healthy upstream=nodeC currentBlock=100 maxBlock=100
 ```
 
 ## Health Status Transitions
@@ -137,15 +144,14 @@ WARN upstream block timeout, marking unhealthy upstream=nodeC timeSinceBlock=35s
 ### Healthy -> Unhealthy
 
 Triggers:
-- Block lag exceeds threshold
-- Block timeout exceeded (no new blocks within configured time)
+- Block lag exceeds threshold after recovery timeout
 - WebSocket connection lost
 - HTTP health check fails
 - Request timeout
 
 Logging:
 ```
-WARN upstream is lagging, marking unhealthy upstream=nodeA currentBlock=999996 maxBlock=1000000 lag=4
+WARN upstream did not catch up in time, marking unhealthy upstream=nodeA currentBlock=999996 targetBlock=1000000 lag=4
 ```
 
 ### Unhealthy -> Healthy
@@ -157,7 +163,7 @@ Triggers:
 
 Logging:
 ```
-INFO upstream recovered, marking healthy upstream=nodeA currentBlock=1000000 maxBlock=1000000
+INFO upstream caught up, marking healthy upstream=nodeA currentBlock=1000000 maxBlock=1000000
 ```
 
 ## Status Logging
