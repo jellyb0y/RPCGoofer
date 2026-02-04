@@ -97,7 +97,6 @@ func (hm *HealthMonitor) OnBlock(upstreamName string, result json.RawMessage) {
 	}
 
 	u.UpdateBlock(blockNum)
-	u.SetHealthy(true)
 	isNewMax := hm.updateMaxBlock(blockNum)
 
 	if isNewMax {
