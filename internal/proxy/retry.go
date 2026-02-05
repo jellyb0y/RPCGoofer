@@ -8,6 +8,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"rpcgofer/internal/balancer"
+	"rpcgofer/internal/blockparam"
 	"rpcgofer/internal/jsonrpc"
 	"rpcgofer/internal/upstream"
 )
@@ -42,15 +43,20 @@ func NewExecutor(b balancer.Selector, pool *upstream.Pool, cfg RetryConfig, logg
 	}
 }
 
-// Execute sends a request with retry logic
-// Tries all available upstreams (main first, then fallback) until success or all exhausted
-func (e *Executor) Execute(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
+// Execute sends a request with retry logic.
+// Tries all available upstreams (main first, then fallback) until success or all exhausted.
+// initialExclude optionally pre-excludes upstreams (e.g. those that have not caught up to the requested block).
+func (e *Executor) Execute(ctx context.Context, req *jsonrpc.Request, initialExclude map[string]bool) (*jsonrpc.Response, error) {
+	tried := make(map[string]bool)
+	if initialExclude != nil {
+		for k, v := range initialExclude {
+			tried[k] = v
+		}
+	}
 	if !e.config.Enabled {
-		resp, _, err := e.executeOnce(ctx, req, nil, false)
+		resp, _, err := e.executeOnce(ctx, req, tried, false)
 		return resp, err
 	}
-
-	tried := make(map[string]bool)
 	var lastErr error
 	var lastResp *jsonrpc.Response
 	var lastUpstream string
@@ -189,14 +195,19 @@ func (e *Executor) executeOnce(ctx context.Context, req *jsonrpc.Request, exclud
 	return resp, upstreamName, nil
 }
 
-// ExecuteBatch sends a batch of requests with retry logic
-func (e *Executor) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request) ([]*jsonrpc.Response, error) {
+// ExecuteBatch sends a batch of requests with retry logic.
+// initialExclude optionally pre-excludes upstreams (e.g. those that have not caught up to the max requested block).
+func (e *Executor) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request, initialExclude map[string]bool) ([]*jsonrpc.Response, error) {
+	tried := make(map[string]bool)
+	if initialExclude != nil {
+		for k, v := range initialExclude {
+			tried[k] = v
+		}
+	}
 	if !e.config.Enabled {
-		responses, _, err := e.executeBatchOnce(ctx, requests, nil, false)
+		responses, _, err := e.executeBatchOnce(ctx, requests, tried, false)
 		return responses, err
 	}
-
-	tried := make(map[string]bool)
 	var lastErr error
 	var lastUpstream string
 	usedFallback := false
@@ -309,16 +320,46 @@ func (e *Executor) executeBatchOnce(ctx context.Context, requests []*jsonrpc.Req
 	return responses, upstreamName, nil
 }
 
-// ExecuteWithPool creates a temporary executor for a pool and executes
+// ExecuteWithPool creates a temporary executor for a pool and executes.
+// Upstreams that have not caught up to the requested block (for block-dependent methods) are excluded from selection.
 func ExecuteWithPool(ctx context.Context, pool *upstream.Pool, req *jsonrpc.Request, cfg RetryConfig, logger zerolog.Logger) (*jsonrpc.Response, error) {
-	b := balancer.NewWeightedRoundRobin(pool)
-	exec := NewExecutor(b, pool, cfg, logger)
-	return exec.Execute(ctx, req)
+	var initialExclude map[string]bool
+	if requestedBlock, ok := blockparam.GetRequestedBlockNumber(req.Method, req.Params); ok && requestedBlock > 0 {
+		for _, u := range pool.GetForRequest() {
+			if u.GetCurrentBlock() < requestedBlock {
+				if initialExclude == nil {
+					initialExclude = make(map[string]bool)
+				}
+				initialExclude[u.Name()] = true
+			}
+		}
+	}
+	bal := balancer.NewWeightedRoundRobin(pool)
+	exec := NewExecutor(bal, pool, cfg, logger)
+	return exec.Execute(ctx, req, initialExclude)
 }
 
-// ExecuteBatchWithPool creates a temporary executor for a pool and executes a batch
+// ExecuteBatchWithPool creates a temporary executor for a pool and executes a batch.
+// Upstreams that have not caught up to the max requested block in the batch are excluded from selection.
 func ExecuteBatchWithPool(ctx context.Context, pool *upstream.Pool, requests []*jsonrpc.Request, cfg RetryConfig, logger zerolog.Logger) ([]*jsonrpc.Response, error) {
-	b := balancer.NewWeightedRoundRobin(pool)
-	exec := NewExecutor(b, pool, cfg, logger)
-	return exec.ExecuteBatch(ctx, requests)
+	var maxBlock uint64
+	for _, req := range requests {
+		if b, ok := blockparam.GetRequestedBlockNumber(req.Method, req.Params); ok && b > maxBlock {
+			maxBlock = b
+		}
+	}
+	var initialExclude map[string]bool
+	if maxBlock > 0 {
+		for _, u := range pool.GetForRequest() {
+			if u.GetCurrentBlock() < maxBlock {
+				if initialExclude == nil {
+					initialExclude = make(map[string]bool)
+				}
+				initialExclude[u.Name()] = true
+			}
+		}
+	}
+	bal := balancer.NewWeightedRoundRobin(pool)
+	exec := NewExecutor(bal, pool, cfg, logger)
+	return exec.ExecuteBatch(ctx, requests, initialExclude)
 }

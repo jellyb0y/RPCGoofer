@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+
+	"rpcgofer/internal/blockparam"
 )
 
 // MethodCacheability defines how a method should be cached
@@ -62,15 +64,6 @@ var methodCacheRules = map[string]MethodCacheability{
 	// Cacheable with specific block range only
 	"eth_getLogs":   CacheableWithBlockRange,
 	"trace_filter":  CacheableWithBlockRange,
-}
-
-// blockTags that indicate dynamic/latest data - not cacheable
-var dynamicBlockTags = map[string]bool{
-	"latest":    true,
-	"pending":   true,
-	"earliest":  true,
-	"safe":      true,
-	"finalized": true,
 }
 
 // disabledMethods holds methods that should not be cached (configured at runtime)
@@ -131,78 +124,15 @@ func containsDynamicBlockTag(method string, params json.RawMessage) bool {
 		return true // Cannot parse, assume not cacheable
 	}
 
-	// Get the block parameter position based on method
-	blockParamIdx := getBlockParamIndex(method)
+	blockParamIdx := blockparam.GetBlockParamIndex(method)
 	if blockParamIdx < 0 || blockParamIdx >= len(paramsArray) {
-		// For methods that require block param but don't have it, they default to latest
 		if blockParamIdx >= 0 {
 			return true
 		}
 		return false
 	}
 
-	return isDynamicBlockParam(paramsArray[blockParamIdx])
-}
-
-// getBlockParamIndex returns the index of block parameter for each method
-func getBlockParamIndex(method string) int {
-	switch method {
-	// eth methods
-	case "eth_getBlockByNumber":
-		return 0
-	case "eth_getCode", "eth_getBalance", "eth_getTransactionCount":
-		return 1
-	case "eth_getStorageAt":
-		return 2
-	case "eth_call":
-		return 1
-	case "eth_getBlockTransactionCountByNumber":
-		return 0
-	case "eth_getTransactionByBlockNumberAndIndex":
-		return 0
-	case "eth_getBlockReceipts":
-		return 0
-	case "eth_getProof":
-		return 2
-
-	// debug methods
-	case "debug_traceBlockByNumber":
-		return 0
-	case "debug_traceCall":
-		return 1 // [callObject, blockNumber, tracerConfig]
-
-	// trace methods (OpenEthereum/Erigon)
-	case "trace_call":
-		return 1 // [callObject, blockNumber, traceTypes]
-	case "trace_callMany":
-		return 1 // [calls, blockNumber]
-	case "trace_replayBlockTransactions":
-		return 0 // [blockNumber, traceTypes]
-
-	default:
-		return -1
-	}
-}
-
-// isDynamicBlockParam checks if a single param is a dynamic block tag
-func isDynamicBlockParam(param json.RawMessage) bool {
-	var strParam string
-	if err := json.Unmarshal(param, &strParam); err != nil {
-		// Could be an object (for eth_call block param which can be object or string)
-		var objParam map[string]interface{}
-		if err := json.Unmarshal(param, &objParam); err != nil {
-			return true // Cannot parse, assume dynamic
-		}
-		// Check for blockNumber field in object
-		if blockNum, ok := objParam["blockNumber"]; ok {
-			if strBlockNum, ok := blockNum.(string); ok {
-				return dynamicBlockTags[strings.ToLower(strBlockNum)]
-			}
-		}
-		return false
-	}
-
-	return dynamicBlockTags[strings.ToLower(strParam)]
+	return blockparam.IsDynamicBlockParam(paramsArray[blockParamIdx])
 }
 
 // containsDynamicBlockRange checks if eth_getLogs params contain dynamic block tags
@@ -225,27 +155,23 @@ func containsDynamicBlockRange(params json.RawMessage) bool {
 		return true
 	}
 
-	// Check fromBlock
 	if fromBlock, ok := filterObj["fromBlock"]; ok {
 		if strFromBlock, ok := fromBlock.(string); ok {
-			if dynamicBlockTags[strings.ToLower(strFromBlock)] {
+			if blockparam.DynamicBlockTags[strings.ToLower(strFromBlock)] {
 				return true
 			}
 		}
 	} else {
-		// No fromBlock means default to latest
 		return true
 	}
 
-	// Check toBlock
 	if toBlock, ok := filterObj["toBlock"]; ok {
 		if strToBlock, ok := toBlock.(string); ok {
-			if dynamicBlockTags[strings.ToLower(strToBlock)] {
+			if blockparam.DynamicBlockTags[strings.ToLower(strToBlock)] {
 				return true
 			}
 		}
 	} else {
-		// No toBlock means default to latest
 		return true
 	}
 
