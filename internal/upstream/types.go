@@ -51,6 +51,7 @@ type Status struct {
 	lastBlockTime      time.Time
 	lastBlockTimeMu    sync.RWMutex
 	requestCount       atomic.Uint64
+	batchCount         atomic.Uint64
 	subscriptionCount  atomic.Int64
 	subscriptionEvents atomic.Uint64
 }
@@ -119,6 +120,16 @@ func (s *Status) IncrementRequestCountBy(count uint64) {
 // SwapRequestCount returns the current request count and resets it to zero
 func (s *Status) SwapRequestCount() uint64 {
 	return s.requestCount.Swap(0)
+}
+
+// IncrementBatchCount increments the coalesced batch counter
+func (s *Status) IncrementBatchCount() {
+	s.batchCount.Add(1)
+}
+
+// SwapBatchCount returns the current batch count and resets it to zero
+func (s *Status) SwapBatchCount() uint64 {
+	return s.batchCount.Swap(0)
 }
 
 // IncrementSubscriptionCount increments the subscription counter

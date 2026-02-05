@@ -307,6 +307,7 @@ func NewHandlerExecutor(h *Handler) *HandlerExecutor {
 
 // ExecuteBatch executes a batched request (bypasses batching to avoid recursion)
 func (e *HandlerExecutor) ExecuteBatch(ctx context.Context, groupName string, req *jsonrpc.Request) *jsonrpc.Response {
+	ctx = context.WithValue(ctx, coalescedBatchKey, true)
 	pool, err := e.handler.router.GetPool(groupName)
 	if err != nil {
 		return jsonrpc.NewErrorResponse(req.ID, jsonrpc.NewError(jsonrpc.CodeInternalError, err.Error()))

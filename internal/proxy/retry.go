@@ -19,6 +19,11 @@ var ErrAllUpstreamsFailed = errors.New("all upstreams failed")
 // ErrNoUpstreamsAvailable is returned when no upstreams are available
 var ErrNoUpstreamsAvailable = errors.New("no upstreams available")
 
+// context key for marking coalesced batch requests (set by HandlerExecutor.ExecuteBatch)
+type coalescedBatchKeyType struct{}
+
+var coalescedBatchKey = &coalescedBatchKeyType{}
+
 // RetryConfig holds retry configuration
 type RetryConfig struct {
 	Enabled     bool
@@ -174,6 +179,10 @@ func (e *Executor) executeOnce(ctx context.Context, req *jsonrpc.Request, exclud
 			logEvent.Msg("request failed")
 		}
 		return nil, upstreamName, err
+	}
+
+	if ctx.Value(coalescedBatchKey) != nil {
+		u.IncrementBatchCount()
 	}
 
 	if resp.HasError() {

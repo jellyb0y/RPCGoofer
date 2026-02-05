@@ -162,6 +162,16 @@ func (u *Upstream) SwapRequestCount() uint64 {
 	return u.status.SwapRequestCount()
 }
 
+// IncrementBatchCount increments the coalesced batch counter for this upstream
+func (u *Upstream) IncrementBatchCount() {
+	u.status.IncrementBatchCount()
+}
+
+// SwapBatchCount returns the current batch count and resets it to zero
+func (u *Upstream) SwapBatchCount() uint64 {
+	return u.status.SwapBatchCount()
+}
+
 // IncrementSubscriptionCount increments the subscription counter
 func (u *Upstream) IncrementSubscriptionCount() {
 	u.status.IncrementSubscriptionCount()
@@ -283,8 +293,8 @@ func (u *Upstream) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request
 	}
 	defer resp.Body.Close()
 
-	// Increment request counter by number of requests in batch
-	u.IncrementRequestCountBy(uint64(len(requests)))
+	// Increment request counter (one HTTP call = one request to upstream)
+	u.IncrementRequestCount()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
