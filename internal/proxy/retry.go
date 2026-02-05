@@ -192,11 +192,13 @@ func (e *Executor) executeOnce(ctx context.Context, req *jsonrpc.Request, exclud
 // ExecuteBatch sends a batch of requests with retry logic
 func (e *Executor) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request) ([]*jsonrpc.Response, error) {
 	if !e.config.Enabled {
-		return e.executeBatchOnce(ctx, requests, nil, false)
+		responses, _, err := e.executeBatchOnce(ctx, requests, nil, false)
+		return responses, err
 	}
 
 	tried := make(map[string]bool)
 	var lastErr error
+	var lastUpstream string
 	usedFallback := false
 
 	maxAttempts := e.config.MaxAttempts
@@ -214,7 +216,7 @@ func (e *Executor) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request
 				Msg("all main upstreams failed for batch, falling back to fallback upstreams")
 		}
 
-		responses, err := e.executeBatchOnce(ctx, requests, tried, usedFallback)
+		responses, upstreamName, err := e.executeBatchOnce(ctx, requests, tried, usedFallback)
 
 		if err == nil {
 			// Check if any response has a retryable error
@@ -230,8 +232,10 @@ func (e *Executor) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request
 			}
 			// Has retryable errors, continue
 			lastErr = fmt.Errorf("batch has retryable errors")
+			lastUpstream = upstreamName
 		} else {
 			lastErr = err
+			lastUpstream = upstreamName
 		}
 
 		if ctx.Err() != nil {
@@ -242,13 +246,16 @@ func (e *Executor) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request
 			break
 		}
 
-		e.logger.Warn().
+		logEvent := e.logger.Warn().
 			Int("attempt", attempt+1).
 			Int("maxAttempts", maxAttempts).
 			Err(lastErr).
 			Int("requests", len(requests)).
-			Bool("usingFallback", usedFallback).
-			Msg("batch request failed, retrying")
+			Bool("usingFallback", usedFallback)
+		if lastUpstream != "" {
+			logEvent = logEvent.Str("upstream", lastUpstream)
+		}
+		logEvent.Msg("batch request failed, retrying")
 	}
 
 	if lastErr != nil {
