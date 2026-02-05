@@ -1,6 +1,7 @@
 package jsonrpc
 
 import (
+	"bytes"
 	"encoding/json"
 )
 
@@ -20,6 +21,17 @@ func (r *Response) HasError() bool {
 // IsSuccess returns true if the response is successful
 func (r *Response) IsSuccess() bool {
 	return r.Error == nil
+}
+
+// ResultIsNull returns true if the response result is JSON null
+func (r *Response) ResultIsNull() bool {
+	if r == nil {
+		return true
+	}
+	if r.Result == nil || len(r.Result) == 0 {
+		return true
+	}
+	return bytes.Equal(r.Result, []byte("null"))
 }
 
 // NewResponse creates a successful response

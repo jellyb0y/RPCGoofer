@@ -221,8 +221,8 @@ func (c *Client) handleSingle(ctx context.Context, req *jsonrpc.Request) {
 		return
 	}
 
-	// Cache successful response
-	if resp.IsSuccess() && cache.IsCacheable(req.Method, req.Params) {
+	// Cache successful response (do not cache result: null)
+	if resp.IsSuccess() && !resp.ResultIsNull() && cache.IsCacheable(req.Method, req.Params) {
 		cacheKey := cache.GenerateCacheKey(c.groupName, req.Method, req.Params)
 		if respBytes, err := resp.Bytes(); err == nil {
 			c.cache.Set(cacheKey, respBytes)
@@ -327,8 +327,8 @@ func (c *Client) handleBatch(ctx context.Context, requests []*jsonrpc.Request) {
 					responses[idx] = resp
 					req := regularReqs[idx]
 
-					// Cache successful response
-					if resp.IsSuccess() && cache.IsCacheable(req.Method, req.Params) {
+					// Cache successful response (do not cache result: null)
+					if resp.IsSuccess() && !resp.ResultIsNull() && cache.IsCacheable(req.Method, req.Params) {
 						cacheKey := cache.GenerateCacheKey(c.groupName, req.Method, req.Params)
 						if respBytes, err := resp.Bytes(); err == nil {
 							c.cache.Set(cacheKey, respBytes)

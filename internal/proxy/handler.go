@@ -155,8 +155,8 @@ func (h *Handler) executeWithCache(ctx context.Context, pool *upstream.Pool, gro
 		return jsonrpc.NewErrorResponse(req.ID, jsonrpc.NewError(jsonrpc.CodeInternalError, "all upstreams failed"))
 	}
 
-	// Cache successful response
-	if resp.IsSuccess() && cache.IsCacheable(req.Method, req.Params) {
+	// Cache successful response (do not cache result: null)
+	if resp.IsSuccess() && !resp.ResultIsNull() && cache.IsCacheable(req.Method, req.Params) {
 		cacheKey := cache.GenerateCacheKey(groupName, req.Method, req.Params)
 		if respBytes, err := resp.Bytes(); err == nil {
 			h.cache.Set(cacheKey, respBytes)
@@ -233,8 +233,8 @@ func (h *Handler) executeBatchWithCache(ctx context.Context, pool *upstream.Pool
 				responses[idx] = resp
 				req := requests[idx]
 
-				// Cache successful response
-				if resp.IsSuccess() && cache.IsCacheable(req.Method, req.Params) {
+				// Cache successful response (do not cache result: null)
+				if resp.IsSuccess() && !resp.ResultIsNull() && cache.IsCacheable(req.Method, req.Params) {
 					cacheKey := cache.GenerateCacheKey(groupName, req.Method, req.Params)
 					if respBytes, err := resp.Bytes(); err == nil {
 						h.cache.Set(cacheKey, respBytes)
