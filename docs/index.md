@@ -27,29 +27,34 @@ RPCGofer is a high-performance JSON-RPC proxy designed for Ethereum-compatible b
    - Main vs Fallback Upstreams
    - Retry Logic
 
-5. [Health Monitoring](./health-monitoring.md)
+5. [Block-Aware Routing](./block-aware-routing.md)
+   - Block-dependent methods and requested block detection
+   - Excluding lagging upstreams from selection
+   - blockparam module (reuse in cache and proxy)
+
+6. [Health Monitoring](./health-monitoring.md)
    - Block-Based Health Checks
    - WebSocket vs Polling Monitoring
    - Lag Threshold Configuration
    - Request Statistics Logging
 
-6. [Caching System](./caching.md)
+7. [Caching System](./caching.md)
    - Cacheable Methods
    - Cache Key Generation
    - TTL and Eviction
 
-7. [WebSocket Subscriptions](./subscriptions.md)
+8. [WebSocket Subscriptions](./subscriptions.md)
    - Supported Subscription Types
    - Multi-Upstream Aggregation
    - Event Deduplication
 
-8. [Plugins](./plugins.md)
+9. [Plugins](./plugins.md)
    - Writing Custom RPC Methods
    - Available APIs (upstream, utils, console)
    - Configuration and Directory Setup
    - Examples and Best Practices
 
-9. [Deployment](./deployment.md)
+10. [Deployment](./deployment.md)
    - Docker and Docker Compose
    - Building from Source
    - Systemd Service

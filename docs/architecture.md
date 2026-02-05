@@ -54,7 +54,7 @@ Main server orchestration. Creates and manages HTTP RPC and WebSocket servers, i
 Request proxying logic including:
 - **Handler**: HTTP request handling, batch support
 - **Router**: Group-based request routing
-- **Retry**: Automatic retry with failover
+- **Retry**: Automatic retry with failover, block-aware upstream exclusion (see [Block-Aware Routing](./block-aware-routing.md))
 
 ### upstream/
 Upstream node management:
@@ -67,10 +67,16 @@ Load balancing algorithms:
 - **Weighted Round-Robin**: Distributes requests based on configured weights
 - **Simple Round-Robin**: Equal distribution
 
+### blockparam/
+Block parameter handling (shared by proxy and cache):
+- **GetBlockParamIndex**: Index of block parameter per RPC method
+- **GetRequestedBlockNumber**: Parse requested block from params (single block or range)
+- **IsDynamicBlockParam**: Detect dynamic tags (latest, pending, etc.)
+
 ### cache/
 Response caching system:
 - **Memory Cache**: LRU cache with TTL support
-- **Methods**: Cacheability rules for RPC methods
+- **Methods**: Cacheability rules for RPC methods (uses blockparam for block-dependent methods)
 - **Noop Cache**: Disabled cache implementation
 
 ### subscription/

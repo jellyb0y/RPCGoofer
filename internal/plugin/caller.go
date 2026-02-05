@@ -114,7 +114,7 @@ func (c *PoolCaller) BatchCall(calls []CallRequest) ([]json.RawMessage, error) {
 
 // executeWithRetry executes a single request with retry logic
 func (c *PoolCaller) executeWithRetry(req *jsonrpc.Request) (*jsonrpc.Response, error) {
-	b := balancer.NewWeightedRoundRobin(c.pool)
+	b := c.pool.GetSelector()
 
 	if !c.retryConfig.Enabled {
 		return c.executeOnce(b, req, nil)
@@ -171,7 +171,7 @@ func (c *PoolCaller) executeWithRetry(req *jsonrpc.Request) (*jsonrpc.Response, 
 
 // executeBatchWithRetry executes a batch with retry logic
 func (c *PoolCaller) executeBatchWithRetry(requests []*jsonrpc.Request) ([]*jsonrpc.Response, error) {
-	b := balancer.NewWeightedRoundRobin(c.pool)
+	b := c.pool.GetSelector()
 
 	if !c.retryConfig.Enabled {
 		return c.executeBatchOnce(b, requests, nil)

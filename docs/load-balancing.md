@@ -11,6 +11,7 @@ The primary load balancing algorithm is Weighted Round-Robin (WRR), which distri
 1. Each upstream has a configurable weight (default: 1)
 2. Upstreams with higher weights receive proportionally more requests
 3. The algorithm cycles through upstreams, selecting each based on its weight
+4. One WRR balancer instance per pool; its state is preserved between requests so that when multiple main upstreams are available, distribution stays even over time
 
 ### Example
 
@@ -174,6 +175,10 @@ The balancer only considers healthy upstreams when selecting targets.
 3. Recovered upstreams automatically re-included
 4. Balancer state reset when upstream pool changes
 ```
+
+## Block-Aware Exclusion
+
+For block-dependent methods (e.g. `eth_getBlockByNumber`, `eth_call`, `eth_getLogs`), RPCGofer can exclude upstreams that have not yet synced the requested block. This avoids sending a request for block N to an upstream whose current block is below N. See [Block-Aware Routing](./block-aware-routing.md) for details.
 
 ## Upstream Exclusion
 

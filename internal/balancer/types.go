@@ -2,12 +2,8 @@ package balancer
 
 import "rpcgofer/internal/upstream"
 
-// Selector defines the interface for selecting an upstream
-type Selector interface {
-	// Next returns the next upstream to use, excluding any in the exclude map
-	// Returns nil if no suitable upstream is available
-	Next(exclude map[string]bool) *upstream.Upstream
-}
+// Selector is the interface for selecting an upstream; same as upstream.Selector for compatibility
+type Selector = upstream.Selector
 
 // UpstreamProvider provides access to upstreams
 type UpstreamProvider interface {

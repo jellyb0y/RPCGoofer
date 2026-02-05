@@ -334,7 +334,7 @@ func ExecuteWithPool(ctx context.Context, pool *upstream.Pool, req *jsonrpc.Requ
 			}
 		}
 	}
-	bal := balancer.NewWeightedRoundRobin(pool)
+	bal := pool.GetSelector()
 	exec := NewExecutor(bal, pool, cfg, logger)
 	return exec.Execute(ctx, req, initialExclude)
 }
@@ -359,7 +359,7 @@ func ExecuteBatchWithPool(ctx context.Context, pool *upstream.Pool, requests []*
 			}
 		}
 	}
-	bal := balancer.NewWeightedRoundRobin(pool)
+	bal := pool.GetSelector()
 	exec := NewExecutor(bal, pool, cfg, logger)
 	return exec.ExecuteBatch(ctx, requests, initialExclude)
 }

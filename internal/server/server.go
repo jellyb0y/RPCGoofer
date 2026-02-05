@@ -8,6 +8,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"rpcgofer/internal/balancer"
 	"rpcgofer/internal/batcher"
 	"rpcgofer/internal/cache"
 	"rpcgofer/internal/config"
@@ -123,6 +124,7 @@ func New(cfg *config.Config, logger zerolog.Logger) (*Server, error) {
 // AddGroup adds an upstream group to the server
 func (s *Server) AddGroup(groupCfg config.GroupConfig) {
 	pool := upstream.NewPool(groupCfg, s.cfg, s.logger)
+	pool.SetSelector(balancer.NewWeightedRoundRobin(pool))
 
 	// Create SharedSubscriptionManager for this pool
 	sharedSubMgr := subscription.NewSharedSubscriptionManager(

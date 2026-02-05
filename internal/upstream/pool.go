@@ -8,6 +8,11 @@ import (
 	"rpcgofer/internal/config"
 )
 
+// Selector selects an upstream for a request; exclude map filters out upstreams (e.g. by block or retry).
+type Selector interface {
+	Next(exclude map[string]bool) *Upstream
+}
+
 // Pool represents a group of upstreams
 type Pool struct {
 	name             string
@@ -15,6 +20,7 @@ type Pool struct {
 	monitor          *HealthMonitor
 	newHeadsProvider NewHeadsProvider
 	methodStats      *MethodStats
+	selector         Selector
 	logger           zerolog.Logger
 	mu               sync.RWMutex
 }
@@ -54,6 +60,16 @@ func NewPool(groupCfg config.GroupConfig, globalCfg *config.Config, logger zerol
 // Name returns the pool name
 func (p *Pool) Name() string {
 	return p.name
+}
+
+// GetSelector returns the shared upstream selector for this pool
+func (p *Pool) GetSelector() Selector {
+	return p.selector
+}
+
+// SetSelector sets the upstream selector; call after pool creation (e.g. from server) to inject the balancer
+func (p *Pool) SetSelector(s Selector) {
+	p.selector = s
 }
 
 // Start starts the health monitor
