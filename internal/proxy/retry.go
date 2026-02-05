@@ -46,12 +46,14 @@ func NewExecutor(b balancer.Selector, pool *upstream.Pool, cfg RetryConfig, logg
 // Tries all available upstreams (main first, then fallback) until success or all exhausted
 func (e *Executor) Execute(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
 	if !e.config.Enabled {
-		return e.executeOnce(ctx, req, nil, false)
+		resp, _, err := e.executeOnce(ctx, req, nil, false)
+		return resp, err
 	}
 
 	tried := make(map[string]bool)
 	var lastErr error
 	var lastResp *jsonrpc.Response
+	var lastUpstream string
 	usedFallback := false
 
 	maxAttempts := e.config.MaxAttempts
@@ -69,7 +71,7 @@ func (e *Executor) Execute(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.
 				Msg("all main upstreams failed, falling back to fallback upstreams")
 		}
 
-		resp, err := e.executeOnce(ctx, req, tried, usedFallback)
+		resp, upstreamName, err := e.executeOnce(ctx, req, tried, usedFallback)
 
 		// Success - no error and no JSON-RPC error
 		if err == nil && !resp.HasError() {
@@ -85,8 +87,10 @@ func (e *Executor) Execute(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.
 			}
 			lastResp = resp
 			lastErr = fmt.Errorf("RPC error: %s", resp.Error.Message)
+			lastUpstream = upstreamName
 		} else if err != nil {
 			lastErr = err
+			lastUpstream = upstreamName
 		}
 
 		// Check if it's a context cancellation
@@ -99,13 +103,16 @@ func (e *Executor) Execute(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.
 			break
 		}
 
-		e.logger.Warn().
+		logEvent := e.logger.Warn().
 			Int("attempt", attempt+1).
 			Int("maxAttempts", maxAttempts).
 			Err(lastErr).
 			Str("method", req.Method).
-			Bool("usingFallback", usedFallback).
-			Msg("request failed, retrying")
+			Bool("usingFallback", usedFallback)
+		if lastUpstream != "" {
+			logEvent = logEvent.Str("upstream", lastUpstream)
+		}
+		logEvent.Msg("request failed, retrying")
 	}
 
 	// All retries exhausted
@@ -134,36 +141,38 @@ func (e *Executor) isUsingFallback(tried map[string]bool) bool {
 	return len(mainUpstreams) > 0
 }
 
-// executeOnce executes the request on a single upstream
-func (e *Executor) executeOnce(ctx context.Context, req *jsonrpc.Request, exclude map[string]bool, isFallback bool) (*jsonrpc.Response, error) {
+// executeOnce executes the request on a single upstream.
+// Returns response, upstream name (empty if no upstream was selected), and error.
+func (e *Executor) executeOnce(ctx context.Context, req *jsonrpc.Request, exclude map[string]bool, isFallback bool) (*jsonrpc.Response, string, error) {
 	u := e.balancer.Next(exclude)
 	if u == nil {
-		return nil, ErrNoUpstreamsAvailable
+		return nil, "", ErrNoUpstreamsAvailable
 	}
 
+	upstreamName := u.Name()
 	if exclude != nil {
-		exclude[u.Name()] = true
+		exclude[upstreamName] = true
 	}
 
 	resp, err := u.Execute(ctx, req)
 	if err != nil {
 		logEvent := e.logger.Warn().
 			Err(err).
-			Str("upstream", u.Name()).
+			Str("upstream", upstreamName).
 			Str("method", req.Method).
 			Bool("isFallback", u.IsFallback())
-		
+
 		if isFallback {
 			logEvent.Msg("fallback request failed")
 		} else {
 			logEvent.Msg("request failed")
 		}
-		return nil, err
+		return nil, upstreamName, err
 	}
 
 	if resp.HasError() {
 		e.logger.Debug().
-			Str("upstream", u.Name()).
+			Str("upstream", upstreamName).
 			Str("method", req.Method).
 			Int("errorCode", resp.Error.Code).
 			Str("errorMessage", resp.Error.Message).
@@ -171,13 +180,13 @@ func (e *Executor) executeOnce(ctx context.Context, req *jsonrpc.Request, exclud
 			Msg("RPC error response")
 	} else {
 		e.logger.Debug().
-			Str("upstream", u.Name()).
+			Str("upstream", upstreamName).
 			Str("method", req.Method).
 			Bool("isFallback", u.IsFallback()).
 			Msg("request succeeded")
 	}
 
-	return resp, nil
+	return resp, upstreamName, nil
 }
 
 // ExecuteBatch sends a batch of requests with retry logic
@@ -249,46 +258,48 @@ func (e *Executor) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request
 	return nil, ErrAllUpstreamsFailed
 }
 
-// executeBatchOnce executes a batch on a single upstream
-func (e *Executor) executeBatchOnce(ctx context.Context, requests []*jsonrpc.Request, exclude map[string]bool, isFallback bool) ([]*jsonrpc.Response, error) {
+// executeBatchOnce executes a batch on a single upstream.
+// Returns responses, upstream name (empty if no upstream was selected), and error.
+func (e *Executor) executeBatchOnce(ctx context.Context, requests []*jsonrpc.Request, exclude map[string]bool, isFallback bool) ([]*jsonrpc.Response, string, error) {
 	u := e.balancer.Next(exclude)
 	if u == nil {
-		return nil, ErrNoUpstreamsAvailable
+		return nil, "", ErrNoUpstreamsAvailable
 	}
 
+	upstreamName := u.Name()
 	if exclude != nil {
-		exclude[u.Name()] = true
+		exclude[upstreamName] = true
 	}
 
 	// Check if upstream supports batch (HTTP only)
 	if !u.HasRPC() {
-		return nil, fmt.Errorf("upstream %s does not support batch requests", u.Name())
+		return nil, upstreamName, fmt.Errorf("upstream %s does not support batch requests", upstreamName)
 	}
 
 	responses, err := u.ExecuteBatch(ctx, requests)
 	if err != nil {
 		logEvent := e.logger.Warn().
 			Err(err).
-			Str("upstream", u.Name()).
+			Str("upstream", upstreamName).
 			Int("requests", len(requests)).
 			Bool("isFallback", u.IsFallback())
-		
+
 		if isFallback {
 			logEvent.Msg("fallback batch request failed")
 		} else {
 			logEvent.Msg("batch request failed")
 		}
-		return nil, err
+		return nil, upstreamName, err
 	}
 
 	e.logger.Debug().
-		Str("upstream", u.Name()).
+		Str("upstream", upstreamName).
 		Int("requests", len(requests)).
 		Int("responses", len(responses)).
 		Bool("isFallback", u.IsFallback()).
 		Msg("batch request succeeded")
 
-	return responses, nil
+	return responses, upstreamName, nil
 }
 
 // ExecuteWithPool creates a temporary executor for a pool and executes
