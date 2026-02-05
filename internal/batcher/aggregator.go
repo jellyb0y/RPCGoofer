@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rs/zerolog"
 
@@ -19,11 +20,12 @@ type BatchExecutor interface {
 
 // Aggregator aggregates requests for batching
 type Aggregator struct {
-	config   map[string]*config.BatchMethodConfig       // method -> config
-	buckets  map[string]map[BatchKey]*BatchBucket       // groupName -> batchKey -> bucket
-	executor BatchExecutor
-	logger   zerolog.Logger
-	mu       sync.RWMutex
+	config     map[string]*config.BatchMethodConfig       // method -> config
+	buckets    map[string]map[BatchKey]*BatchBucket       // groupName -> batchKey -> bucket
+	executor   BatchExecutor
+	logger     zerolog.Logger
+	mu         sync.RWMutex
+	batchCount uint64 // coalesced batches executed (for stats)
 }
 
 // NewAggregator creates a new batch aggregator
@@ -310,6 +312,8 @@ func (a *Aggregator) flush(ctx context.Context, groupName string, batchKey Batch
 		}
 	}
 
+	atomic.AddUint64(&a.batchCount, 1)
+
 	a.logger.Debug().
 		Str("method", bucket.GetMethod()).
 		Int("items", len(items)).
@@ -346,6 +350,11 @@ func (a *Aggregator) Close(ctx context.Context) {
 
 	a.FlushAll(ctx)
 	a.logger.Info().Msg("batch aggregator closed")
+}
+
+// SwapBatchCount returns the number of coalesced batches executed since last swap and resets the counter.
+func (a *Aggregator) SwapBatchCount() uint64 {
+	return atomic.SwapUint64(&a.batchCount, 0)
 }
 
 // GetMethods returns list of methods with batching enabled

@@ -15,6 +15,11 @@ import (
 	"rpcgofer/internal/jsonrpc"
 )
 
+// BatchStatsProvider provides coalesced batch count for request statistics.
+type BatchStatsProvider interface {
+	SwapBatchCount() uint64
+}
+
 // HealthMonitor monitors the health of upstreams in a group
 type HealthMonitor struct {
 	upstreams          []*Upstream
@@ -28,6 +33,7 @@ type HealthMonitor struct {
 
 	newHeadsProvider NewHeadsProvider
 	methodStats      *MethodStats
+	batchStats       BatchStatsProvider
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -69,6 +75,11 @@ func (hm *HealthMonitor) SetNewHeadsProvider(provider NewHeadsProvider) {
 // SetMethodStats sets the method stats for tracking method calls
 func (hm *HealthMonitor) SetMethodStats(stats *MethodStats) {
 	hm.methodStats = stats
+}
+
+// SetBatchStats sets the provider for coalesced batch count (optional).
+func (hm *HealthMonitor) SetBatchStats(provider BatchStatsProvider) {
+	hm.batchStats = provider
 }
 
 // ID implements NewHeadsSubscriber interface
@@ -309,8 +320,13 @@ func (hm *HealthMonitor) logCurrentRequestStats() {
 		topMethods = hm.methodStats.SwapAndGetTop(15)
 	}
 
+	var coalescedBatches uint64
+	if hm.batchStats != nil {
+		coalescedBatches = hm.batchStats.SwapBatchCount()
+	}
+
 	// Build formatted statistics string
-	stats := hm.formatStats(totalRequests, totalSubEvents, requestStats, subEventStats, subCountStats, topMethods)
+	stats := hm.formatStats(totalRequests, totalSubEvents, coalescedBatches, requestStats, subEventStats, subCountStats, topMethods)
 
 	hm.logger.Info().
 		Dur("interval", hm.statsLogInterval).
@@ -321,6 +337,7 @@ func (hm *HealthMonitor) logCurrentRequestStats() {
 func (hm *HealthMonitor) formatStats(
 	totalRequests uint64,
 	totalSubEvents uint64,
+	coalescedBatches uint64,
 	requestStats map[string]uint64,
 	subEventStats map[string]uint64,
 	subCountStats map[string]int64,
@@ -330,6 +347,7 @@ func (hm *HealthMonitor) formatStats(
 
 	buf.WriteString("request statistics\n")
 	buf.WriteString(fmt.Sprintf("  total_requests: %d\n", totalRequests))
+	buf.WriteString(fmt.Sprintf("  total_coalesced_batches: %d\n", coalescedBatches))
 	buf.WriteString(fmt.Sprintf("  total_sub_events: %d\n", totalSubEvents))
 
 	// Upstreams section

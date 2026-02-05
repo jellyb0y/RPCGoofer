@@ -268,6 +268,11 @@ func (p *Pool) SetNewHeadsProvider(provider NewHeadsProvider) {
 	p.monitor.SetNewHeadsProvider(provider)
 }
 
+// SetBatchStats sets the BatchStatsProvider for the health monitor (for coalesced batch count in request statistics).
+func (p *Pool) SetBatchStats(provider BatchStatsProvider) {
+	p.monitor.SetBatchStats(provider)
+}
+
 // GetNewHeadsProvider returns the NewHeadsProvider
 func (p *Pool) GetNewHeadsProvider() NewHeadsProvider {
 	return p.newHeadsProvider

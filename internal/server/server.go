@@ -140,6 +140,10 @@ func (s *Server) AddGroup(groupCfg config.GroupConfig) {
 	newHeadsProvider := subscription.NewNewHeadsProviderAdapter(sharedSubMgr)
 	pool.SetNewHeadsProvider(newHeadsProvider)
 
+	if s.batchAggregator != nil {
+		pool.SetBatchStats(s.batchAggregator)
+	}
+
 	s.router.AddPool(pool)
 	s.logger.Info().
 		Str("group", groupCfg.Name).
