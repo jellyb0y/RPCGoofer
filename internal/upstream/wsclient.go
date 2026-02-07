@@ -33,6 +33,7 @@ type UpstreamWSClient struct {
 
 	conn   *websocket.Conn
 	connMu sync.RWMutex
+	writeMu sync.Mutex
 
 	pending    map[int64]chan *jsonrpc.Response
 	pendingMu  sync.Mutex
@@ -147,11 +148,14 @@ func (c *UpstreamWSClient) SendRequest(ctx context.Context, req *jsonrpc.Request
 		return nil, fmt.Errorf("WebSocket not connected")
 	}
 
-	if err := conn.WriteMessage(websocket.TextMessage, reqBytes); err != nil {
+	c.writeMu.Lock()
+	writeErr := conn.WriteMessage(websocket.TextMessage, reqBytes)
+	c.writeMu.Unlock()
+	if writeErr != nil {
 		c.pendingMu.Lock()
 		delete(c.pending, reqID)
 		c.pendingMu.Unlock()
-		return nil, fmt.Errorf("failed to send request: %w", err)
+		return nil, fmt.Errorf("failed to send request: %w", writeErr)
 	}
 
 	c.upstream.IncrementRequestCount()
@@ -224,11 +228,14 @@ func (c *UpstreamWSClient) Subscribe(ctx context.Context, subType string, params
 		return "", fmt.Errorf("WebSocket not connected")
 	}
 
-	if err := conn.WriteMessage(websocket.TextMessage, reqBytes); err != nil {
+	c.writeMu.Lock()
+	writeErr := conn.WriteMessage(websocket.TextMessage, reqBytes)
+	c.writeMu.Unlock()
+	if writeErr != nil {
 		c.pendingMu.Lock()
 		delete(c.pending, reqID)
 		c.pendingMu.Unlock()
-		return "", fmt.Errorf("failed to send subscribe request: %w", err)
+		return "", fmt.Errorf("failed to send subscribe request: %w", writeErr)
 	}
 
 	var upstreamSubID string
@@ -311,11 +318,14 @@ func (c *UpstreamWSClient) subscribeInternal(ctx context.Context, subType string
 		return "", fmt.Errorf("WebSocket not connected")
 	}
 
-	if err := conn.WriteMessage(websocket.TextMessage, reqBytes); err != nil {
+	c.writeMu.Lock()
+	writeErr := conn.WriteMessage(websocket.TextMessage, reqBytes)
+	c.writeMu.Unlock()
+	if writeErr != nil {
 		c.pendingMu.Lock()
 		delete(c.pending, reqID)
 		c.pendingMu.Unlock()
-		return "", fmt.Errorf("failed to send subscribe request: %w", err)
+		return "", fmt.Errorf("failed to send subscribe request: %w", writeErr)
 	}
 
 	var upstreamSubID string
@@ -363,7 +373,9 @@ func (c *UpstreamWSClient) Unsubscribe(subID string) {
 	}
 
 	reqBytes, _ := req.Bytes()
+	c.writeMu.Lock()
 	conn.WriteMessage(websocket.TextMessage, reqBytes)
+	c.writeMu.Unlock()
 }
 
 func (c *UpstreamWSClient) readLoop() {
