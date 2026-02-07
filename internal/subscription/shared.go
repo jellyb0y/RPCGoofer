@@ -9,10 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
 
-	"rpcgofer/internal/jsonrpc"
 	"rpcgofer/internal/upstream"
 )
 
@@ -170,9 +168,9 @@ func (m *SharedSubscriptionManager) createSharedSubscription(ctx context.Context
 		managerCtx:        m.ctx,
 	}
 
-	// Subscribe to all upstreams with WebSocket
+	// Subscribe to all upstreams with WebSocket (uses shared connection owned by upstream)
 	for _, u := range upstreams {
-		upSub, err := shared.subscribeToUpstream(ctx, u, subType, params)
+		upSub, err := shared.registerUpstreamSubscription(ctx, u, subType, params)
 		if err != nil {
 			m.logger.Warn().
 				Err(err).
@@ -182,9 +180,6 @@ func (m *SharedSubscriptionManager) createSharedSubscription(ctx context.Context
 			continue
 		}
 		shared.upstreamSubs[u.Name()] = upSub
-
-		// Start reading events from this upstream with reconnection support
-		go shared.readUpstreamEventsWithReconnect(u, upSub)
 	}
 
 	if len(shared.upstreamSubs) == 0 {
@@ -212,11 +207,11 @@ type SharedSubscription struct {
 	managerCtx        context.Context
 }
 
-// sharedUpstreamSub represents a subscription to a single upstream
+// sharedUpstreamSub represents a subscription to a single upstream via the shared WebSocket connection
 type sharedUpstreamSub struct {
-	id        string          // Subscription ID from upstream
-	conn      *websocket.Conn // WebSocket connection
-	closeChan chan struct{}
+	id          string
+	closeChan   chan struct{}
+	unsubscribe func()
 }
 
 // AddSubscriber adds a subscriber to this shared subscription
@@ -259,256 +254,56 @@ func (s *SharedSubscription) Close() {
 	s.logger.Debug().Msg("shared subscription closed")
 }
 
-// subscribeToUpstream creates a subscription on a single upstream
-func (s *SharedSubscription) subscribeToUpstream(ctx context.Context, u *upstream.Upstream, subType SubscriptionType, params json.RawMessage) (*sharedUpstreamSub, error) {
+// registerUpstreamSubscription subscribes to an upstream via its shared WebSocket connection
+func (s *SharedSubscription) registerUpstreamSubscription(ctx context.Context, u *upstream.Upstream, subType SubscriptionType, params json.RawMessage) (*sharedUpstreamSub, error) {
 	if !u.HasWS() {
 		return nil, fmt.Errorf("upstream has no WebSocket URL")
 	}
 
-	// Connect to upstream WebSocket
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-	}
-
-	conn, _, err := dialer.DialContext(ctx, u.WSURL(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect: %w", err)
-	}
-
-	// Build subscription request
-	var subParams []interface{}
-	subParams = append(subParams, string(subType))
-	if params != nil && len(params) > 0 && string(params) != "null" {
-		var additionalParams interface{}
-		if err := json.Unmarshal(params, &additionalParams); err == nil {
-			subParams = append(subParams, additionalParams)
-		}
-	}
-
-	req, err := jsonrpc.NewRequest("eth_subscribe", subParams, jsonrpc.NewIDInt(1))
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	reqBytes, err := req.Bytes()
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	if err := conn.WriteMessage(websocket.TextMessage, reqBytes); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-
-	// Read response
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	_, respData, err := conn.ReadMessage()
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-	conn.SetReadDeadline(time.Time{}) // Clear deadline
-
-	var resp jsonrpc.Response
-	if err := json.Unmarshal(respData, &resp); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if resp.HasError() {
-		conn.Close()
-		return nil, fmt.Errorf("subscription error: %s", resp.Error.Message)
-	}
-
-	// Extract subscription ID
-	var upstreamSubID string
-	if err := json.Unmarshal(resp.Result, &upstreamSubID); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to parse subscription ID: %w", err)
-	}
-
-	// Increment subscription count for the upstream
-	u.IncrementSubscriptionCount()
-
-	return &sharedUpstreamSub{
-		id:        upstreamSubID,
-		conn:      conn,
-		closeChan: make(chan struct{}),
-	}, nil
-}
-
-// readUpstreamEventsWithReconnect reads events from an upstream subscription with automatic reconnection
-func (s *SharedSubscription) readUpstreamEventsWithReconnect(u *upstream.Upstream, upSub *sharedUpstreamSub) {
 	upstreamName := u.Name()
 
-	for {
-		// Check if we should stop
-		select {
-		case <-s.closeChan:
-			s.cleanupUpstreamSub(upstreamName, upSub)
-			return
-		case <-s.managerCtx.Done():
-			s.cleanupUpstreamSub(upstreamName, upSub)
-			return
-		default:
-		}
-
-		// Read events until error
-		shouldReconnect := s.readUpstreamEvents(upstreamName, upSub)
-
-		if !shouldReconnect {
-			s.cleanupUpstreamSub(upstreamName, upSub)
-			return
-		}
-
-		// Clean up current connection
-		upSub.conn.Close()
-
-		// Wait before reconnecting
-		s.logger.Info().
-			Str("upstream", upstreamName).
-			Dur("interval", s.reconnectInterval).
-			Msg("waiting before reconnection attempt")
-
-		select {
-		case <-s.closeChan:
-			s.mu.Lock()
-			delete(s.upstreamSubs, upstreamName)
-			s.mu.Unlock()
-			return
-		case <-s.managerCtx.Done():
-			s.mu.Lock()
-			delete(s.upstreamSubs, upstreamName)
-			s.mu.Unlock()
-			return
-		case <-time.After(s.reconnectInterval):
-		}
-
-		// Attempt to reconnect
-		newUpSub, err := s.reconnectToUpstream(u)
-		if err != nil {
-			s.logger.Warn().
-				Err(err).
-				Str("upstream", upstreamName).
-				Msg("failed to reconnect to upstream, will retry")
-			continue
-		}
-
-		// Update the subscription
-		s.mu.Lock()
-		s.upstreamSubs[upstreamName] = newUpSub
-		s.mu.Unlock()
-		upSub = newUpSub
-
-		s.logger.Info().
-			Str("upstream", upstreamName).
-			Msg("successfully reconnected to upstream")
-	}
-}
-
-// cleanupUpstreamSub cleans up an upstream subscription
-func (s *SharedSubscription) cleanupUpstreamSub(upstreamName string, upSub *sharedUpstreamSub) {
-	if upSub.conn != nil {
-		upSub.conn.Close()
-	}
-	// Decrement subscription count
-	if u := s.pool.GetByName(upstreamName); u != nil {
-		u.DecrementSubscriptionCount()
-	}
-	s.mu.Lock()
-	delete(s.upstreamSubs, upstreamName)
-	s.mu.Unlock()
-}
-
-// reconnectToUpstream attempts to reconnect to an upstream
-func (s *SharedSubscription) reconnectToUpstream(u *upstream.Upstream) (*sharedUpstreamSub, error) {
-	ctx, cancel := context.WithTimeout(s.managerCtx, 30*time.Second)
-	defer cancel()
-
-	return s.subscribeToUpstream(ctx, u, s.subType, s.params)
-}
-
-// readUpstreamEvents reads events from an upstream subscription and broadcasts to all subscribers
-// Returns true if reconnection should be attempted, false if we should stop completely
-func (s *SharedSubscription) readUpstreamEvents(upstreamName string, upSub *sharedUpstreamSub) bool {
-	for {
-		select {
-		case <-s.closeChan:
-			return false
-		case <-upSub.closeChan:
-			return false
-		case <-s.managerCtx.Done():
-			return false
-		default:
-		}
-
-		// Set read deadline based on configured timeout
-		readTimeout := s.messageTimeout
-		if readTimeout == 0 {
-			readTimeout = 60 * time.Second
-		}
-		upSub.conn.SetReadDeadline(time.Now().Add(readTimeout))
-
-		_, data, err := upSub.conn.ReadMessage()
-		if err != nil {
-			// Check if the shared subscription is being closed
-			select {
-			case <-s.closeChan:
-				return false
-			case <-s.managerCtx.Done():
-				return false
-			default:
-			}
-
-			s.logger.Warn().
-				Err(err).
-				Str("upstream", upstreamName).
-				Msg("upstream read error, will attempt reconnection")
-			return true // Indicate that reconnection should be attempted
-		}
-
-		// Parse notification
-		var notification SubscriptionNotification
-		if err := json.Unmarshal(data, &notification); err != nil {
-			continue // Not a notification
-		}
-
-		if notification.Method != "eth_subscription" {
-			continue
-		}
-
-		// Increment subscription events counter for the upstream
-		if u := s.pool.GetByName(upstreamName); u != nil {
-			u.IncrementSubscriptionEvents()
-		}
-
-		// Check for duplicates (but still broadcast to subscribers that skip dedup)
-		isDuplicate := s.dedup.IsDuplicate(s.subType, notification.Params.Result)
-
-		if isDuplicate {
-			s.logger.Debug().
-				Str("upstream", upstreamName).
-				Msg("duplicate event, broadcasting only to skipDedup subscribers")
-		}
-
-		// Create event and broadcast to all subscribers
+	eventHandler := func(result json.RawMessage) {
+		isDuplicate := s.dedup.IsDuplicate(subType, result)
 		event := SubscriptionEvent{
 			UpstreamName: upstreamName,
-			SubType:      s.subType,
-			Result:       notification.Params.Result,
+			SubType:      subType,
+			Result:       result,
 		}
-
 		s.broadcastEvent(event, isDuplicate)
 
 		if !isDuplicate {
 			s.logger.Debug().
 				Str("upstream", upstreamName).
-				Str("type", string(s.subType)).
+				Str("type", string(subType)).
 				Msg("broadcasted event to subscribers")
 		}
 	}
+
+	subID, err := u.SubscribeWS(ctx, string(subType), params, eventHandler)
+	if err != nil {
+		return nil, fmt.Errorf("failed to subscribe: %w", err)
+	}
+
+	upSub := &sharedUpstreamSub{
+		id:        subID,
+		closeChan: make(chan struct{}),
+		unsubscribe: func() {
+			u.UnsubscribeWS(subID)
+		},
+	}
+
+	return upSub, nil
+}
+
+// cleanupUpstreamSub cleans up an upstream subscription
+func (s *SharedSubscription) cleanupUpstreamSub(upstreamName string, upSub *sharedUpstreamSub) {
+	close(upSub.closeChan)
+	if upSub.unsubscribe != nil {
+		upSub.unsubscribe()
+	}
+	s.mu.Lock()
+	delete(s.upstreamSubs, upstreamName)
+	s.mu.Unlock()
 }
 
 // broadcastEvent sends an event to all subscribers
@@ -530,28 +325,11 @@ func (s *SharedSubscription) broadcastEvent(event SubscriptionEvent, isDuplicate
 	}
 }
 
-// unsubscribeFromUpstream sends unsubscribe request to upstream and closes connection
+// unsubscribeFromUpstream unsubscribes from upstream and cleans up
 func (s *SharedSubscription) unsubscribeFromUpstream(upstreamName string, upSub *sharedUpstreamSub) {
 	close(upSub.closeChan)
-
-	// Try to send unsubscribe request
-	req, err := jsonrpc.NewRequest("eth_unsubscribe", []string{upSub.id}, jsonrpc.NewIDInt(1))
-	if err != nil {
-		upSub.conn.Close()
-		// Decrement subscription count
-		if u := s.pool.GetByName(upstreamName); u != nil {
-			u.DecrementSubscriptionCount()
-		}
-		return
-	}
-
-	reqBytes, _ := req.Bytes()
-	upSub.conn.WriteMessage(websocket.TextMessage, reqBytes)
-	upSub.conn.Close()
-
-	// Decrement subscription count
-	if u := s.pool.GetByName(upstreamName); u != nil {
-		u.DecrementSubscriptionCount()
+	if upSub.unsubscribe != nil {
+		upSub.unsubscribe()
 	}
 
 	s.logger.Debug().

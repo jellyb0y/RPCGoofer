@@ -1,7 +1,9 @@
 package upstream
 
 import (
+	"context"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -15,14 +17,16 @@ type Selector interface {
 
 // Pool represents a group of upstreams
 type Pool struct {
-	name             string
-	upstreams        []*Upstream
-	monitor          *HealthMonitor
-	newHeadsProvider NewHeadsProvider
-	methodStats      *MethodStats
-	selector         Selector
-	logger           zerolog.Logger
-	mu               sync.RWMutex
+	name                string
+	upstreams           []*Upstream
+	monitor             *HealthMonitor
+	newHeadsProvider    NewHeadsProvider
+	methodStats         *MethodStats
+	selector            Selector
+	logger              zerolog.Logger
+	mu                  sync.RWMutex
+	messageTimeout      time.Duration
+	reconnectInterval   time.Duration
 }
 
 // NewPool creates a new Pool from a group configuration
@@ -49,11 +53,13 @@ func NewPool(groupCfg config.GroupConfig, globalCfg *config.Config, logger zerol
 	monitor.SetMethodStats(methodStats)
 
 	return &Pool{
-		name:        groupCfg.Name,
-		upstreams:   upstreams,
-		monitor:     monitor,
-		methodStats: methodStats,
-		logger:      poolLogger,
+		name:              groupCfg.Name,
+		upstreams:         upstreams,
+		monitor:           monitor,
+		methodStats:       methodStats,
+		logger:            poolLogger,
+		messageTimeout:    globalCfg.GetUpstreamMessageTimeoutDuration(),
+		reconnectInterval: globalCfg.GetUpstreamReconnectIntervalDuration(),
 	}
 }
 
@@ -72,8 +78,16 @@ func (p *Pool) SetSelector(s Selector) {
 	p.selector = s
 }
 
-// Start starts the health monitor
+// Start starts the WebSocket connections for upstreams with wsUrl, then the health monitor
 func (p *Pool) Start() {
+	ctx := context.Background()
+	for _, u := range p.upstreams {
+		if u.HasWS() {
+			if err := u.StartWS(ctx, p.messageTimeout, p.reconnectInterval); err != nil {
+				p.logger.Warn().Err(err).Str("upstream", u.Name()).Msg("failed to start WebSocket")
+			}
+		}
+	}
 	p.monitor.Start()
 	p.logger.Info().
 		Int("upstreams", len(p.upstreams)).

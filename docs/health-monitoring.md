@@ -16,16 +16,18 @@ For upstreams with WebSocket URLs configured, health is monitored via `newHeads`
 
 **Flow:**
 ```
-1. Connect to upstream WebSocket
-2. Subscribe to newHeads
+1. Pool starts: establish one WebSocket connection per upstream with wsUrl
+2. Health monitor subscribes to newHeads on each connection
 3. For each new block header:
    - Extract block number
    - Update upstream's current block
    - Recalculate health status
 4. On connection failure:
    - Mark upstream unhealthy
-   - Attempt reconnection after 5 seconds
+   - UpstreamWSClient reconnects and re-subscribes automatically
 ```
+
+The same connection is shared for subscriptions (newHeads, logs, etc.) and RPC calls when `preferWs` is enabled.
 
 ### HTTP Polling (Fallback)
 
@@ -278,14 +280,16 @@ INFO request statistics interval=60s
 
 ### WebSocket Reconnection
 
+The UpstreamWSClient owns the WebSocket connection and handles reconnection:
+
 ```
-1. Connection lost detected
+1. Connection lost detected (read error or message timeout)
 2. Mark upstream unhealthy
-3. Wait 5 seconds
+3. Wait reconnectInterval (default: 5 seconds)
 4. Attempt reconnection
 5. On success:
-   - Re-subscribe to newHeads
-   - Resume monitoring
+   - Re-subscribe to all active subscriptions (newHeads, logs, etc.)
+   - Resume event delivery and RPC
 6. On failure:
    - Repeat from step 3
 ```
@@ -303,19 +307,19 @@ Transport: &http.Transport{
 
 ## Per-Group Monitoring
 
-Each upstream group has independent health monitoring.
+Each upstream group has independent health monitoring. Each upstream with wsUrl has one shared WebSocket connection used for newHeads, other subscriptions, and RPC (when preferWs).
 
 ```
 Pool: ethereum
 ├── HealthMonitor
-│   ├── Upstream: infura (WebSocket monitoring)
-│   ├── Upstream: alchemy (WebSocket monitoring)
-│   └── Upstream: public (HTTP polling)
+│   ├── Upstream: infura (1 WS conn: newHeads + RPC if preferWs)
+│   ├── Upstream: alchemy (1 WS conn: newHeads + RPC if preferWs)
+│   └── Upstream: public (HTTP polling only)
 │
 Pool: polygon
 ├── HealthMonitor
-│   ├── Upstream: polygon-main (WebSocket monitoring)
-│   └── Upstream: polygon-backup (HTTP polling)
+│   ├── Upstream: polygon-main (1 WS conn)
+│   └── Upstream: polygon-backup (HTTP polling only)
 ```
 
 ## Best Practices

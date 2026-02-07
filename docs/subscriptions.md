@@ -214,36 +214,37 @@ INF successfully reconnected to upstream upstream=infura
 
 ## Shared Subscriptions (Connection Multiplexing)
 
-RPCGofer uses shared subscriptions to optimize WebSocket connections to upstreams. Instead of creating separate connections for each client, connections are shared among all clients with the same subscription type.
+RPCGofer uses shared subscriptions to optimize WebSocket connections to upstreams. Each upstream with wsUrl has exactly one WebSocket connection, owned by the upstream and shared for subscriptions and RPC.
 
 ### Architecture
 
 ```
-Without Shared Subscriptions (N clients x M upstreams connections):
+Connection model (1 connection per upstream):
 
-  Client 1 ─────┬──> Upstream 1
-               └──> Upstream 2
-  Client 2 ─────┬──> Upstream 1
-               └──> Upstream 2
-  Client 3 ─────┬──> Upstream 1
-               └──> Upstream 2
+  Pool Start
+       |
+       v
+  Upstream 1 (wsUrl) --> UpstreamWSClient --> 1 WebSocket connection
+  Upstream 2 (wsUrl) --> UpstreamWSClient --> 1 WebSocket connection
 
-  Total: 6 WebSocket connections
-
-With Shared Subscriptions (M connections, regardless of clients):
+  Same connection used for:
+  - newHeads subscription (health monitor + clients)
+  - logs, newPendingTransactions, etc.
+  - RPC calls when preferWs is true
 
   Client 1 ──┐
-  Client 2 ──┼──> SharedSubscription ───┬──> Upstream 1
-  Client 3 ──┘       (newHeads)         └──> Upstream 2
+  Client 2 ──┼──> SharedSubscription ───┬──> Upstream 1 (SubscribeWS on shared conn)
+  Client 3 ──┘       (newHeads)         └──> Upstream 2 (SubscribeWS on shared conn)
 
-  Total: 2 WebSocket connections
+  Total: 1 connection per upstream (not per subscription type or client)
 ```
 
 ### How It Works
 
-1. **SharedSubscriptionManager** - central manager for all shared subscriptions per group
-2. **SharedSubscription** - one shared subscription per unique `(type, params)` combination
-3. **Subscribers** - both clients and internal components (like health monitor) subscribe to shared subscriptions
+1. **Pool** - at startup, establishes one WebSocket connection per upstream with wsUrl (UpstreamWSClient)
+2. **SharedSubscriptionManager** - central manager for all shared subscriptions per group
+3. **SharedSubscription** - one shared subscription per unique `(type, params)` combination; subscribes via upstream.SubscribeWS on the existing connection
+4. **Subscribers** - both clients and internal components (like health monitor) subscribe to shared subscriptions
 
 ### Subscription Key
 
@@ -257,9 +258,10 @@ Subscriptions are grouped by type and parameters:
 
 ### Benefits
 
-- **Connection Efficiency**: Only M connections to upstreams regardless of client count
+- **Connection Efficiency**: One connection per upstream regardless of subscription types or client count
 - **Resource Optimization**: Single deduplication cache per subscription type
 - **Unified Event Flow**: Health monitoring and client subscriptions use the same event stream
+- **RPC over WebSocket**: When `preferWs` is enabled, RPC calls use the same connection
 - **Scalability**: Supports thousands of clients without proportional connection growth
 
 ### Internal Integration
@@ -431,15 +433,15 @@ Each WebSocket connection has an associated client session that tracks:
 ```
 1. First subscriber requests subscription type
 2. SharedSubscription created:
-   a. Connects to all upstreams with WebSocket
-   b. Subscribes to events on each upstream
-   c. Starts event reading goroutines
+   a. For each upstream with WebSocket: calls upstream.SubscribeWS (uses existing connection)
+   b. Registers event handlers; events delivered by upstream's reader goroutine
 3. Additional subscribers join existing SharedSubscription
 4. When last subscriber leaves:
-   a. Unsubscribe from all upstreams
-   b. Close all WebSocket connections
-   c. Remove SharedSubscription
+   a. Unsubscribe from all upstreams (eth_unsubscribe on shared connection)
+   b. Remove SharedSubscription (connections remain open for other uses)
 ```
+
+WebSocket connections are owned by the upstream and persist for the pool's lifetime. They are not closed when a SharedSubscription is removed.
 
 ## Error Handling
 

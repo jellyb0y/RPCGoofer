@@ -58,7 +58,8 @@ Request proxying logic including:
 
 ### upstream/
 Upstream node management:
-- **Upstream**: Single node connection and execution
+- **Upstream**: Single node connection and execution (HTTP and optional WebSocket)
+- **UpstreamWSClient**: Owns one WebSocket connection per upstream; multiplexes subscriptions and RPC
 - **Pool**: Group of upstreams with shared health monitoring
 - **Health Monitor**: Real-time health checking via WebSocket or polling
 
@@ -132,15 +133,18 @@ WebSocket handling:
 
 ```
 1. Pool started for each group
-2. Health monitor spawned for each upstream
-3. For upstreams with WebSocket:
-   - Subscribe to newHeads
+2. For upstreams with WebSocket: establish connection (one per upstream)
+3. Health monitor spawned
+4. For upstreams with WebSocket:
+   - Subscribe to newHeads on the shared connection
    - Update block number on each header
-4. For HTTP-only upstreams:
+5. For HTTP-only upstreams:
    - Poll eth_blockNumber periodically
-5. Compare block numbers across upstreams
-6. Mark upstream unhealthy if lag > threshold
+6. Compare block numbers across upstreams
+7. Mark upstream unhealthy if lag > threshold
 ```
+
+The same WebSocket connection is used for newHeads subscription, other subscription types (logs, etc.), and RPC calls when `preferWs` is enabled.
 
 ## Batch Requests
 
@@ -229,8 +233,8 @@ Note: Subscription methods (`eth_subscribe`, `eth_unsubscribe`) in batch are pro
 ## Concurrency Model
 
 - Each upstream pool runs independent health monitoring goroutines
-- WebSocket clients have separate read and write goroutines
-- Subscriptions use goroutines per upstream connection
+- Each upstream with WebSocket has one connection; one reader goroutine dispatches RPC responses and subscription events
+- SharedSubscription does not own connections; it subscribes via the upstream's shared connection
 - LRU cache operations are thread-safe with mutex protection
 - Balancer state protected by mutex
 

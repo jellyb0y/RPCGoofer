@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
 
 	"rpcgofer/internal/config"
@@ -30,11 +28,7 @@ type Upstream struct {
 	status     *Status
 	logger     zerolog.Logger
 
-	// WebSocket connection for subscriptions
-	wsMu     sync.Mutex
-	wsConn   *websocket.Conn
-	wsReqID  int64
-	wsPending map[int64]chan *jsonrpc.Response
+	wsClient *UpstreamWSClient
 }
 
 // Config for creating a new Upstream
@@ -73,7 +67,6 @@ func NewUpstream(cfg Config) *Upstream {
 		httpClient: httpClient,
 		status:     NewStatus(),
 		logger:     cfg.Logger.With().Str("upstream", cfg.Name).Logger(),
-		wsPending:  make(map[int64]chan *jsonrpc.Response),
 	}
 }
 
@@ -324,135 +317,45 @@ func (u *Upstream) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request
 
 // ExecuteWS sends a JSON-RPC request via WebSocket
 func (u *Upstream) ExecuteWS(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
-	u.wsMu.Lock()
-	if u.wsConn == nil {
-		u.wsMu.Unlock()
+	if u.wsClient == nil {
 		return nil, fmt.Errorf("WebSocket not connected")
 	}
-
-	// Create response channel
-	u.wsReqID++
-	reqID := u.wsReqID
-	respChan := make(chan *jsonrpc.Response, 1)
-	u.wsPending[reqID] = respChan
-
-	// Modify request ID for tracking
-	wsReq := req.Clone()
-	wsReq.ID = jsonrpc.NewIDInt(reqID)
-
-	reqBytes, err := wsReq.Bytes()
-	if err != nil {
-		delete(u.wsPending, reqID)
-		u.wsMu.Unlock()
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	err = u.wsConn.WriteMessage(websocket.TextMessage, reqBytes)
-	u.wsMu.Unlock()
-
-	if err != nil {
-		u.wsMu.Lock()
-		delete(u.wsPending, reqID)
-		u.wsMu.Unlock()
-		return nil, fmt.Errorf("failed to send WS request: %w", err)
-	}
-
-	// Increment request counter after successful WS send
-	u.IncrementRequestCount()
-
-	// Wait for response with context
-	select {
-	case resp := <-respChan:
-		// Restore original ID
-		resp.ID = req.ID
-		return resp, nil
-	case <-ctx.Done():
-		u.wsMu.Lock()
-		delete(u.wsPending, reqID)
-		u.wsMu.Unlock()
-		return nil, ctx.Err()
-	}
+	return u.wsClient.SendRequest(ctx, req)
 }
 
-// ConnectWS establishes a WebSocket connection
-func (u *Upstream) ConnectWS(ctx context.Context) error {
+// StartWS establishes the WebSocket connection for this upstream. Called by Pool at startup.
+func (u *Upstream) StartWS(ctx context.Context, messageTimeout time.Duration, reconnectInterval time.Duration) error {
 	if u.wsURL == "" {
 		return fmt.Errorf("WebSocket URL not configured")
 	}
-
-	u.wsMu.Lock()
-	defer u.wsMu.Unlock()
-
-	if u.wsConn != nil {
-		return nil // Already connected
+	if u.wsClient != nil {
+		return nil
 	}
 
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-	}
-
-	conn, _, err := dialer.DialContext(ctx, u.wsURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to connect WebSocket: %w", err)
-	}
-
-	u.wsConn = conn
-	u.logger.Debug().Msg("WebSocket connected")
-
-	return nil
+	u.wsClient = NewUpstreamWSClient(u.wsURL, messageTimeout, reconnectInterval, u, u.logger)
+	return u.wsClient.Connect(ctx)
 }
 
-// DisconnectWS closes the WebSocket connection
-func (u *Upstream) DisconnectWS() {
-	u.wsMu.Lock()
-	defer u.wsMu.Unlock()
-
-	if u.wsConn != nil {
-		u.wsConn.Close()
-		u.wsConn = nil
-		u.logger.Debug().Msg("WebSocket disconnected")
+// SubscribeWS subscribes to an event type on the upstream WebSocket. Returns the subscription ID.
+func (u *Upstream) SubscribeWS(ctx context.Context, subType string, params json.RawMessage, onEvent func(json.RawMessage)) (string, error) {
+	if u.wsClient == nil {
+		return "", fmt.Errorf("WebSocket not connected")
 	}
-
-	// Cancel all pending requests
-	for id, ch := range u.wsPending {
-		close(ch)
-		delete(u.wsPending, id)
-	}
+	return u.wsClient.Subscribe(ctx, subType, params, onEvent)
 }
 
-// HandleWSMessage processes an incoming WebSocket message
-// This should be called from a goroutine reading the WebSocket
-func (u *Upstream) HandleWSMessage(data []byte) {
-	// Try to parse as response first
-	var resp jsonrpc.Response
-	if err := json.Unmarshal(data, &resp); err == nil && resp.ID.Value() != nil {
-		// It's a response to a request
-		if idFloat, ok := resp.ID.Value().(float64); ok {
-			reqID := int64(idFloat)
-			u.wsMu.Lock()
-			if ch, exists := u.wsPending[reqID]; exists {
-				delete(u.wsPending, reqID)
-				u.wsMu.Unlock()
-				ch <- &resp
-				return
-			}
-			u.wsMu.Unlock()
-		}
+// UnsubscribeWS unsubscribes from an event on the upstream WebSocket.
+func (u *Upstream) UnsubscribeWS(subID string) {
+	if u.wsClient != nil {
+		u.wsClient.Unsubscribe(subID)
 	}
-
-	// Otherwise it might be a subscription notification
-	// This will be handled by the subscription manager
-}
-
-// GetWSConn returns the WebSocket connection (for subscription handling)
-func (u *Upstream) GetWSConn() *websocket.Conn {
-	u.wsMu.Lock()
-	defer u.wsMu.Unlock()
-	return u.wsConn
 }
 
 // Close closes all connections
 func (u *Upstream) Close() {
-	u.DisconnectWS()
+	if u.wsClient != nil {
+		u.wsClient.Close()
+		u.wsClient = nil
+	}
 	u.httpClient.CloseIdleConnections()
 }
