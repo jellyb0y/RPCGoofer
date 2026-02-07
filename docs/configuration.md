@@ -160,8 +160,9 @@ Groups define collections of upstream nodes for different blockchain networks.
 | `upstreams[].wsUrl` | string | - | WebSocket endpoint URL |
 | `upstreams[].weight` | int | `1` | Load balancing weight |
 | `upstreams[].role` | string | `"main"` | Role: `"main"` or `"fallback"` |
+| `upstreams[].preferWs` | bool | `false` | When both `rpcUrl` and `wsUrl` are set, prefer WebSocket for RPC calls. Batch requests always use HTTP when available |
 
-At least one of `rpcUrl` or `wsUrl` is required per upstream.
+At least one of `rpcUrl` or `wsUrl` is required per upstream. By default, HTTP is preferred over WebSocket when both are configured.
 
 ## Configuration Examples
 

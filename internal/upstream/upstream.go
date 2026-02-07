@@ -19,11 +19,12 @@ import (
 
 // Upstream represents a single upstream RPC endpoint
 type Upstream struct {
-	name   string
-	rpcURL string
-	wsURL  string
-	weight int
-	role   Role
+	name     string
+	rpcURL   string
+	wsURL    string
+	weight   int
+	role     Role
+	preferWS bool
 
 	httpClient *http.Client
 	status     *Status
@@ -43,6 +44,7 @@ type Config struct {
 	WSURL          string
 	Weight         int
 	Role           Role
+	PreferWS       bool
 	RequestTimeout time.Duration
 	Logger         zerolog.Logger
 }
@@ -67,6 +69,7 @@ func NewUpstream(cfg Config) *Upstream {
 		wsURL:      cfg.WSURL,
 		weight:     cfg.Weight,
 		role:       cfg.Role,
+		preferWS:   cfg.PreferWS,
 		httpClient: httpClient,
 		status:     NewStatus(),
 		logger:     cfg.Logger.With().Str("upstream", cfg.Name).Logger(),
@@ -82,6 +85,7 @@ func NewUpstreamFromConfig(cfg config.UpstreamConfig, globalCfg *config.Config, 
 		WSURL:          cfg.WSURL,
 		Weight:         cfg.Weight,
 		Role:           RoleFromConfig(cfg.Role),
+		PreferWS:       cfg.PreferWS,
 		RequestTimeout: globalCfg.GetRequestTimeoutDuration(),
 		Logger:         logger,
 	})
@@ -212,9 +216,13 @@ func (u *Upstream) HasWS() bool {
 	return u.wsURL != ""
 }
 
-// Execute sends a JSON-RPC request and returns the response
-// It prefers HTTP RPC, falls back to WebSocket if HTTP is not available
+// Execute sends a JSON-RPC request and returns the response.
+// When preferWS is true and both rpcUrl and wsUrl are configured, uses WebSocket.
+// Otherwise prefers HTTP RPC, falls back to WebSocket if HTTP is not available.
 func (u *Upstream) Execute(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
+	if u.preferWS && u.HasWS() {
+		return u.ExecuteWS(ctx, req)
+	}
 	if u.HasRPC() {
 		return u.ExecuteHTTP(ctx, req)
 	}
