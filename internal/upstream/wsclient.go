@@ -359,22 +359,27 @@ func (c *UpstreamWSClient) Unsubscribe(subID string) {
 
 	c.upstream.DecrementSubscriptionCount()
 
-	c.connMu.RLock()
-	conn := c.conn
-	c.connMu.RUnlock()
-
-	if conn == nil {
-		return
-	}
-
-	req, err := jsonrpc.NewRequest("eth_unsubscribe", []string{subID}, jsonrpc.NewIDInt(1))
+	reqID := atomic.AddInt64(&c.reqID, 1)
+	req, err := jsonrpc.NewRequest("eth_unsubscribe", []string{subID}, jsonrpc.NewIDInt(reqID))
 	if err != nil {
 		return
 	}
 
-	reqBytes, _ := req.Bytes()
+	reqBytes, err := req.Bytes()
+	if err != nil {
+		return
+	}
+
 	c.writeMu.Lock()
-	conn.WriteMessage(websocket.TextMessage, reqBytes)
+	c.connMu.RLock()
+	conn := c.conn
+	if conn == nil {
+		c.connMu.RUnlock()
+		c.writeMu.Unlock()
+		return
+	}
+	_ = conn.WriteMessage(websocket.TextMessage, reqBytes)
+	c.connMu.RUnlock()
 	c.writeMu.Unlock()
 }
 
@@ -502,54 +507,55 @@ func (c *UpstreamWSClient) reconnect() bool {
 	c.pending = make(map[int64]chan *jsonrpc.Response)
 	c.pendingMu.Unlock()
 
-	select {
-	case <-c.ctx.Done():
-		return false
-	case <-time.After(c.reconnectInterval):
-	}
-
-	c.logger.Info().Dur("interval", c.reconnectInterval).Msg("attempting reconnection")
-
-	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
-	defer cancel()
-
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
-	conn, _, err := dialer.DialContext(ctx, c.wsURL, nil)
-	if err != nil {
-		c.logger.Warn().Err(err).Msg("reconnection failed")
-		return true
-	}
+	for {
+		select {
+		case <-c.ctx.Done():
+			return false
+		case <-time.After(c.reconnectInterval):
+		}
 
-	c.connMu.Lock()
-	c.conn = conn
-	c.connMu.Unlock()
+		c.logger.Info().Dur("interval", c.reconnectInterval).Msg("attempting reconnection")
 
-	c.logger.Info().Msg("reconnected successfully")
-
-	c.subMu.Lock()
-	toResubscribe := make([]subParamsEntry, 0, len(c.subParams))
-	for _, entry := range c.subParams {
-		toResubscribe = append(toResubscribe, entry)
-	}
-	c.subHandlers = make(map[string]subscriptionHandler)
-	c.subParams = make(map[string]subParamsEntry)
-	c.subMu.Unlock()
-
-	for _, entry := range toResubscribe {
-		resubCtx, resubCancel := context.WithTimeout(c.ctx, 10*time.Second)
-		subID, err := c.subscribeInternal(resubCtx, entry.subType, entry.params, entry.handler)
-		resubCancel()
-
+		ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+		conn, _, err := dialer.DialContext(ctx, c.wsURL, nil)
+		cancel()
 		if err != nil {
-			c.logger.Warn().Err(err).Str("subType", entry.subType).Msg("failed to re-subscribe")
+			c.logger.Warn().Err(err).Msg("reconnection failed")
 			continue
 		}
 
-		c.subMu.Lock()
-		c.subParams[subID] = entry
-		c.subHandlers[subID] = entry.handler
-		c.subMu.Unlock()
-	}
+		c.connMu.Lock()
+		c.conn = conn
+		c.connMu.Unlock()
 
-	return true
+		c.logger.Info().Msg("reconnected successfully")
+
+		c.subMu.Lock()
+		toResubscribe := make([]subParamsEntry, 0, len(c.subParams))
+		for _, entry := range c.subParams {
+			toResubscribe = append(toResubscribe, entry)
+		}
+		c.subHandlers = make(map[string]subscriptionHandler)
+		c.subParams = make(map[string]subParamsEntry)
+		c.subMu.Unlock()
+
+		for _, entry := range toResubscribe {
+			resubCtx, resubCancel := context.WithTimeout(c.ctx, 10*time.Second)
+			subID, err := c.subscribeInternal(resubCtx, entry.subType, entry.params, entry.handler)
+			resubCancel()
+
+			if err != nil {
+				c.logger.Warn().Err(err).Str("subType", entry.subType).Msg("failed to re-subscribe")
+				continue
+			}
+
+			c.subMu.Lock()
+			c.subParams[subID] = entry
+			c.subHandlers[subID] = entry.handler
+			c.subMu.Unlock()
+		}
+
+		return true
+	}
 }
