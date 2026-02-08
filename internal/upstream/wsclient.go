@@ -71,25 +71,36 @@ func (c *UpstreamWSClient) Connect(ctx context.Context) error {
 		c.connMu.Unlock()
 		return nil
 	}
+	c.connMu.Unlock()
 
+	c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket connecting")
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	conn, _, err := dialer.DialContext(ctx, c.wsURL, nil)
 	if err != nil {
-		c.connMu.Unlock()
 		return fmt.Errorf("failed to connect WebSocket: %w", err)
 	}
 
+	c.connMu.Lock()
 	c.conn = conn
 	c.connMu.Unlock()
 
-	c.logger.Debug().Msg("WebSocket connected")
+	c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket connected")
 	c.wg.Add(1)
 	go c.readLoop()
 	return nil
 }
 
+// Connected returns true if the WebSocket connection is established
+func (c *UpstreamWSClient) Connected() bool {
+	c.connMu.RLock()
+	ok := c.conn != nil
+	c.connMu.RUnlock()
+	return ok
+}
+
 // Close closes the connection and stops the reader
 func (c *UpstreamWSClient) Close() {
+	c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket closing")
 	c.cancel()
 	c.connMu.Lock()
 	if c.conn != nil {
@@ -106,7 +117,7 @@ func (c *UpstreamWSClient) Close() {
 	c.pendingMu.Unlock()
 
 	c.wg.Wait()
-	c.logger.Debug().Msg("WebSocket disconnected")
+	c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket disconnected")
 }
 
 // SendRequest sends an RPC request and waits for the response
@@ -403,6 +414,7 @@ func (c *UpstreamWSClient) readLoop() {
 		c.connMu.RUnlock()
 
 		if conn == nil {
+			c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket reader stopped (no connection)")
 			return
 		}
 
@@ -411,14 +423,16 @@ func (c *UpstreamWSClient) readLoop() {
 		if err != nil {
 			select {
 			case <-c.ctx.Done():
+				c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket reader stopped (shutdown)")
 				return
 			default:
 			}
 
-			c.logger.Warn().Err(err).Msg("upstream read error, attempting reconnection")
+			c.logger.Warn().Str("upstream", c.upstream.Name()).Err(err).Msg("WebSocket connection lost, reconnecting")
 			if c.reconnect() {
 				continue
 			}
+			c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket reader stopped (shutdown)")
 			return
 		}
 
@@ -496,6 +510,7 @@ func (c *UpstreamWSClient) reconnect() bool {
 		c.conn = nil
 	}
 	c.connMu.Unlock()
+	c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket connection closed, starting reconnection loop")
 
 	c.pendingMu.Lock()
 	for _, ch := range c.pending {
@@ -508,20 +523,25 @@ func (c *UpstreamWSClient) reconnect() bool {
 	c.pendingMu.Unlock()
 
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	interval := c.reconnectInterval
+	if interval < 3*time.Second {
+		interval = 3 * time.Second
+	}
 	for {
 		select {
 		case <-c.ctx.Done():
+			c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket reconnection stopped (shutdown)")
 			return false
-		case <-time.After(c.reconnectInterval):
+		case <-time.After(interval):
 		}
 
-		c.logger.Info().Dur("interval", c.reconnectInterval).Msg("attempting reconnection")
+		c.logger.Info().Str("upstream", c.upstream.Name()).Dur("interval", interval).Msg("WebSocket reconnection attempt")
 
 		ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
 		conn, _, err := dialer.DialContext(ctx, c.wsURL, nil)
 		cancel()
 		if err != nil {
-			c.logger.Warn().Err(err).Msg("reconnection failed")
+			c.logger.Warn().Str("upstream", c.upstream.Name()).Err(err).Dur("nextRetry", interval).Msg("WebSocket reconnection failed, will retry")
 			continue
 		}
 
@@ -529,7 +549,7 @@ func (c *UpstreamWSClient) reconnect() bool {
 		c.conn = conn
 		c.connMu.Unlock()
 
-		c.logger.Info().Msg("reconnected successfully")
+		c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket reconnected successfully")
 
 		c.subMu.Lock()
 		toResubscribe := make([]subParamsEntry, 0, len(c.subParams))

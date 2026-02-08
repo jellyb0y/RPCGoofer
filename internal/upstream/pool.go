@@ -27,6 +27,8 @@ type Pool struct {
 	mu                  sync.RWMutex
 	messageTimeout      time.Duration
 	reconnectInterval   time.Duration
+	ctx                 context.Context
+	cancel              context.CancelFunc
 }
 
 // NewPool creates a new Pool from a group configuration
@@ -78,14 +80,14 @@ func (p *Pool) SetSelector(s Selector) {
 	p.selector = s
 }
 
-// Start starts the WebSocket connections for upstreams with wsUrl, then the health monitor
+// Start starts the WebSocket connections for upstreams with wsUrl, then the health monitor.
+// WebSocket connections are retried in background until connected or pool is stopped.
 func (p *Pool) Start() {
-	ctx := context.Background()
+	p.ctx, p.cancel = context.WithCancel(context.Background())
 	for _, u := range p.upstreams {
 		if u.HasWS() {
-			if err := u.StartWS(ctx, p.messageTimeout, p.reconnectInterval); err != nil {
-				p.logger.Warn().Err(err).Str("upstream", u.Name()).Msg("failed to start WebSocket")
-			}
+			up := u
+			go p.runWSRetry(up)
 		}
 	}
 	p.monitor.Start()
@@ -94,8 +96,40 @@ func (p *Pool) Start() {
 		Msg("pool started")
 }
 
+// runWSRetry keeps trying to connect WebSocket in a loop with a short delay until success or context cancelled
+func (p *Pool) runWSRetry(u *Upstream) {
+	retryDelay := p.reconnectInterval
+	if retryDelay < 3*time.Second {
+		retryDelay = 3 * time.Second
+	}
+	p.logger.Info().Str("upstream", u.Name()).Dur("retryInterval", retryDelay).Msg("WebSocket connection loop started, will retry until connected")
+
+	for {
+		select {
+		case <-p.ctx.Done():
+			p.logger.Info().Str("upstream", u.Name()).Msg("WebSocket connection loop stopped (pool shutdown)")
+			return
+		default:
+		}
+		err := u.StartWS(p.ctx, p.messageTimeout, p.reconnectInterval)
+		if err == nil {
+			p.logger.Info().Str("upstream", u.Name()).Msg("WebSocket connected, connection loop finished")
+			return
+		}
+		p.logger.Warn().Err(err).Str("upstream", u.Name()).Dur("nextRetry", retryDelay).Msg("WebSocket connection failed, retrying")
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-time.After(retryDelay):
+		}
+	}
+}
+
 // Stop stops the pool and closes all connections
 func (p *Pool) Stop() {
+	if p.cancel != nil {
+		p.cancel()
+	}
 	p.monitor.Stop()
 	for _, u := range p.upstreams {
 		u.Close()
@@ -226,6 +260,20 @@ func (p *Pool) GetWithWS() []*Upstream {
 	result := make([]*Upstream, 0)
 	for _, u := range p.upstreams {
 		if u.HasWS() {
+			result = append(result, u)
+		}
+	}
+	return result
+}
+
+// GetConnectedWithWS returns upstreams that have WebSocket configured and are currently connected
+func (p *Pool) GetConnectedWithWS() []*Upstream {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	result := make([]*Upstream, 0)
+	for _, u := range p.upstreams {
+		if u.HasWS() && u.IsWSConnected() {
 			result = append(result, u)
 		}
 	}

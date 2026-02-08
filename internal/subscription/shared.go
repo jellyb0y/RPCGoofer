@@ -143,9 +143,9 @@ func (m *SharedSubscriptionManager) generateKey(subType SubscriptionType, params
 
 // createSharedSubscription creates a new shared subscription with upstream connections
 func (m *SharedSubscriptionManager) createSharedSubscription(ctx context.Context, subType SubscriptionType, params json.RawMessage, key string) (*SharedSubscription, error) {
-	upstreams := m.pool.GetWithWS()
+	upstreams := m.pool.GetConnectedWithWS()
 	if len(upstreams) == 0 {
-		return nil, fmt.Errorf("no upstreams with WebSocket available")
+		return nil, fmt.Errorf("no upstreams with WebSocket connected")
 	}
 
 	dedup, err := NewDeduplicator(m.dedupSize)

@@ -323,16 +323,23 @@ func (u *Upstream) ExecuteWS(ctx context.Context, req *jsonrpc.Request) (*jsonrp
 	return u.wsClient.SendRequest(ctx, req)
 }
 
+// IsWSConnected returns true if the upstream has an active WebSocket connection
+func (u *Upstream) IsWSConnected() bool {
+	if u.wsClient == nil {
+		return false
+	}
+	return u.wsClient.Connected()
+}
+
 // StartWS establishes the WebSocket connection for this upstream. Called by Pool at startup.
+// If the client already exists but is disconnected (e.g. initial Connect failed), Connect is retried.
 func (u *Upstream) StartWS(ctx context.Context, messageTimeout time.Duration, reconnectInterval time.Duration) error {
 	if u.wsURL == "" {
 		return fmt.Errorf("WebSocket URL not configured")
 	}
-	if u.wsClient != nil {
-		return nil
+	if u.wsClient == nil {
+		u.wsClient = NewUpstreamWSClient(u.wsURL, messageTimeout, reconnectInterval, u, u.logger)
 	}
-
-	u.wsClient = NewUpstreamWSClient(u.wsURL, messageTimeout, reconnectInterval, u, u.logger)
 	return u.wsClient.Connect(ctx)
 }
 
