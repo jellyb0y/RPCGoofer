@@ -540,21 +540,23 @@ func (c *UpstreamWSClient) reconnect() bool {
 		c.subParams = make(map[string]subParamsEntry)
 		c.subMu.Unlock()
 
-		for _, entry := range toResubscribe {
-			resubCtx, resubCancel := context.WithTimeout(c.ctx, 10*time.Second)
-			subID, err := c.subscribeInternal(resubCtx, entry.subType, entry.params, entry.handler)
-			resubCancel()
+		go func(entries []subParamsEntry) {
+			for _, entry := range entries {
+				resubCtx, resubCancel := context.WithTimeout(c.ctx, 10*time.Second)
+				subID, err := c.subscribeInternal(resubCtx, entry.subType, entry.params, entry.handler)
+				resubCancel()
 
-			if err != nil {
-				c.logger.Warn().Err(err).Str("subType", entry.subType).Msg("failed to re-subscribe")
-				continue
+				if err != nil {
+					c.logger.Warn().Err(err).Str("subType", entry.subType).Msg("failed to re-subscribe")
+					continue
+				}
+
+				c.subMu.Lock()
+				c.subParams[subID] = entry
+				c.subHandlers[subID] = entry.handler
+				c.subMu.Unlock()
 			}
-
-			c.subMu.Lock()
-			c.subParams[subID] = entry
-			c.subHandlers[subID] = entry.handler
-			c.subMu.Unlock()
-		}
+		}(toResubscribe)
 
 		return true
 	}
