@@ -139,6 +139,9 @@ func (s *Server) AddGroup(groupCfg config.GroupConfig) {
 	// Set up NewHeadsProvider for health monitoring
 	newHeadsProvider := subscription.NewNewHeadsProviderAdapter(sharedSubMgr)
 	pool.SetNewHeadsProvider(newHeadsProvider)
+	pool.SetOnUpstreamWSConnected(func(u *upstream.Upstream) {
+		sharedSubMgr.AddUpstreamToExistingSubscriptions(u)
+	})
 
 	if s.batchAggregator != nil {
 		pool.SetBatchStats(s.batchAggregator)

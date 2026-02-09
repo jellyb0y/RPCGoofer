@@ -132,6 +132,27 @@ func (m *SharedSubscriptionManager) GetPool() *upstream.Pool {
 	return m.pool
 }
 
+// AddUpstreamToExistingSubscriptions adds the upstream to all existing shared subscriptions.
+// Call when an upstream's WebSocket connects (e.g. late-connecting or after reconnect).
+func (m *SharedSubscriptionManager) AddUpstreamToExistingSubscriptions(u *upstream.Upstream) {
+	m.mu.RLock()
+	subs := make([]*SharedSubscription, 0, len(m.subscriptions))
+	for _, shared := range m.subscriptions {
+		subs = append(subs, shared)
+	}
+	m.mu.RUnlock()
+
+	for _, shared := range subs {
+		if err := shared.AddUpstream(m.ctx, u); err != nil {
+			m.logger.Warn().
+				Err(err).
+				Str("upstream", u.Name()).
+				Str("key", shared.key).
+				Msg("failed to add upstream to existing shared subscription")
+		}
+	}
+}
+
 // generateKey generates a unique key for a subscription type and params
 func (m *SharedSubscriptionManager) generateKey(subType SubscriptionType, params json.RawMessage) string {
 	if len(params) == 0 || string(params) == "null" {
@@ -233,6 +254,35 @@ func (s *SharedSubscription) SubscriberCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.subscribers)
+}
+
+// AddUpstream adds an upstream to this shared subscription (e.g. when it connects later).
+// Idempotent: if the upstream is already subscribed, returns nil.
+func (s *SharedSubscription) AddUpstream(ctx context.Context, u *upstream.Upstream) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	if _, exists := s.upstreamSubs[u.Name()]; exists {
+		s.mu.Unlock()
+		return nil
+	}
+	s.mu.Unlock()
+
+	upSub, err := s.registerUpstreamSubscription(ctx, u, s.subType, s.params)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		s.unsubscribeFromUpstream(u.Name(), upSub)
+		return nil
+	}
+	s.upstreamSubs[u.Name()] = upSub
+	return nil
 }
 
 // Close closes the shared subscription and all upstream connections

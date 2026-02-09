@@ -462,7 +462,15 @@ func (c *UpstreamWSClient) dispatchMessage(data []byte) {
 
 		if exists && handler != nil {
 			c.upstream.IncrementSubscriptionEvents()
-			handler(base.Params.Result)
+			result := base.Params.Result
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						c.logger.Error().Interface("panic", r).Str("upstream", c.upstream.Name()).Msg("subscription handler panic")
+					}
+				}()
+				handler(result)
+			}()
 		}
 		return
 	}

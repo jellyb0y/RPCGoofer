@@ -17,18 +17,19 @@ type Selector interface {
 
 // Pool represents a group of upstreams
 type Pool struct {
-	name                string
-	upstreams           []*Upstream
-	monitor             *HealthMonitor
-	newHeadsProvider    NewHeadsProvider
-	methodStats         *MethodStats
-	selector            Selector
-	logger              zerolog.Logger
-	mu                  sync.RWMutex
-	messageTimeout      time.Duration
-	reconnectInterval   time.Duration
-	ctx                 context.Context
-	cancel              context.CancelFunc
+	name                  string
+	upstreams              []*Upstream
+	monitor               *HealthMonitor
+	newHeadsProvider      NewHeadsProvider
+	methodStats           *MethodStats
+	selector              Selector
+	logger                zerolog.Logger
+	mu                    sync.RWMutex
+	messageTimeout        time.Duration
+	reconnectInterval     time.Duration
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	onUpstreamWSConnected func(*Upstream)
 }
 
 // NewPool creates a new Pool from a group configuration
@@ -80,6 +81,11 @@ func (p *Pool) SetSelector(s Selector) {
 	p.selector = s
 }
 
+// SetOnUpstreamWSConnected sets a callback invoked when an upstream's WebSocket connects successfully.
+func (p *Pool) SetOnUpstreamWSConnected(f func(*Upstream)) {
+	p.onUpstreamWSConnected = f
+}
+
 // Start starts the WebSocket connections for upstreams with wsUrl, then the health monitor.
 // WebSocket connections are retried in background until connected or pool is stopped.
 func (p *Pool) Start() {
@@ -113,6 +119,9 @@ func (p *Pool) runWSRetry(u *Upstream) {
 		}
 		err := u.StartWS(p.ctx, p.messageTimeout, p.reconnectInterval)
 		if err == nil {
+			if p.onUpstreamWSConnected != nil {
+				p.onUpstreamWSConnected(u)
+			}
 			p.logger.Info().Str("upstream", u.Name()).Msg("WebSocket connected, connection loop finished")
 			return
 		}
