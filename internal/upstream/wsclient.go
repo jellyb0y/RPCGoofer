@@ -42,6 +42,9 @@ type UpstreamWSClient struct {
 	subParams   map[string]subParamsEntry
 	subMu      sync.Mutex
 
+	// firstEventAfterConnect: 0 = not yet logged first subscription event for this connection, 1 = already logged
+	firstEventAfterConnect uint32
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -84,6 +87,7 @@ func (c *UpstreamWSClient) Connect(ctx context.Context) error {
 	c.conn = conn
 	c.connMu.Unlock()
 
+	atomic.StoreUint32(&c.firstEventAfterConnect, 0)
 	c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket connected")
 	c.wg.Add(1)
 	go c.readLoop()
@@ -452,6 +456,11 @@ func (c *UpstreamWSClient) dispatchMessage(data []byte) {
 	}
 
 	if err := json.Unmarshal(data, &base); err != nil {
+		c.logger.Warn().
+			Str("upstream", c.upstream.Name()).
+			Err(err).
+			Int("len", len(data)).
+			Msg("ws message parse error")
 		return
 	}
 
@@ -460,18 +469,31 @@ func (c *UpstreamWSClient) dispatchMessage(data []byte) {
 		handler, exists := c.subHandlers[base.Params.Subscription]
 		c.subMu.Unlock()
 
-		if exists && handler != nil {
-			c.upstream.IncrementSubscriptionEvents()
-			result := base.Params.Result
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						c.logger.Error().Interface("panic", r).Str("upstream", c.upstream.Name()).Msg("subscription handler panic")
-					}
-				}()
-				handler(result)
-			}()
+		if !exists || handler == nil {
+			c.logger.Warn().
+				Str("upstream", c.upstream.Name()).
+				Str("subscription", base.Params.Subscription).
+				Msg("subscription notification, no handler")
+			return
 		}
+
+		if atomic.CompareAndSwapUint32(&c.firstEventAfterConnect, 0, 1) {
+			c.logger.Debug().
+				Str("upstream", c.upstream.Name()).
+				Str("subscription", base.Params.Subscription).
+				Msg("first subscription event after connect")
+		}
+
+		c.upstream.IncrementSubscriptionEvents()
+		result := base.Params.Result
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					c.logger.Error().Interface("panic", r).Str("upstream", c.upstream.Name()).Msg("subscription handler panic")
+				}
+			}()
+			handler(result)
+		}()
 		return
 	}
 
@@ -557,6 +579,7 @@ func (c *UpstreamWSClient) reconnect() bool {
 		c.conn = conn
 		c.connMu.Unlock()
 
+		atomic.StoreUint32(&c.firstEventAfterConnect, 0)
 		c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket reconnected successfully")
 
 		c.subMu.Lock()
@@ -569,21 +592,36 @@ func (c *UpstreamWSClient) reconnect() bool {
 		c.subMu.Unlock()
 
 		go func(entries []subParamsEntry) {
+			total := len(entries)
+			var okCount, failCount int
 			for _, entry := range entries {
 				resubCtx, resubCancel := context.WithTimeout(c.ctx, 10*time.Second)
 				subID, err := c.subscribeInternal(resubCtx, entry.subType, entry.params, entry.handler)
 				resubCancel()
 
 				if err != nil {
+					failCount++
 					c.logger.Warn().Err(err).Str("subType", entry.subType).Msg("failed to re-subscribe")
 					continue
 				}
+				okCount++
+				c.logger.Info().
+					Str("upstream", c.upstream.Name()).
+					Str("subType", entry.subType).
+					Str("subID", subID).
+					Msg("re-subscribed")
 
 				c.subMu.Lock()
 				c.subParams[subID] = entry
 				c.subHandlers[subID] = entry.handler
 				c.subMu.Unlock()
 			}
+			c.logger.Info().
+				Str("upstream", c.upstream.Name()).
+				Int("total", total).
+				Int("ok", okCount).
+				Int("failed", failCount).
+				Msg("reconnect resubscribe done")
 		}(toResubscribe)
 
 		return true
