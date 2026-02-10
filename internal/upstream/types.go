@@ -18,6 +18,8 @@ type BlockEventCallback func(upstreamName string, result json.RawMessage)
 type NewHeadsSubscriber interface {
 	OnBlock(upstreamName string, result json.RawMessage)
 	ID() string
+	// DeliverFirst returns true if this subscriber must be notified before client subscribers
+	DeliverFirst() bool
 }
 
 // NewHeadsProvider provides newHeads subscription functionality

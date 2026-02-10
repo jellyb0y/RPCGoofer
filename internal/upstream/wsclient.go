@@ -45,6 +45,10 @@ type UpstreamWSClient struct {
 	// firstEventAfterConnect: 0 = not yet logged first subscription event for this connection, 1 = already logged
 	firstEventAfterConnect uint32
 
+	msgCount    int64
+	lastReadAt  time.Time
+	readCountMu sync.Mutex
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -422,6 +426,15 @@ func (c *UpstreamWSClient) readLoop() {
 			return
 		}
 
+		c.readCountMu.Lock()
+		lastRead := c.lastReadAt
+		msgCount := c.msgCount
+		c.readCountMu.Unlock()
+		c.logger.Debug().
+			Str("upstream", c.upstream.Name()).
+			Int64("msgCount", msgCount).
+			Msg("readLoop entering ReadMessage")
+
 		conn.SetReadDeadline(time.Now().Add(readTimeout))
 		_, data, err := conn.ReadMessage()
 		if err != nil {
@@ -432,13 +445,25 @@ func (c *UpstreamWSClient) readLoop() {
 			default:
 			}
 
-			c.logger.Warn().Str("upstream", c.upstream.Name()).Err(err).Msg("WebSocket connection lost, reconnecting")
+			c.readCountMu.Lock()
+			lastRead = c.lastReadAt
+			c.readCountMu.Unlock()
+			c.logger.Warn().
+				Str("upstream", c.upstream.Name()).
+				Err(err).
+				Time("lastReadAt", lastRead).
+				Msg("WebSocket connection lost, reconnecting")
 			if c.reconnect() {
 				continue
 			}
 			c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket reader stopped (shutdown)")
 			return
 		}
+
+		c.readCountMu.Lock()
+		c.msgCount++
+		c.lastReadAt = time.Now()
+		c.readCountMu.Unlock()
 
 		c.dispatchMessage(data)
 	}
@@ -492,7 +517,14 @@ func (c *UpstreamWSClient) dispatchMessage(data []byte) {
 					c.logger.Error().Interface("panic", r).Str("upstream", c.upstream.Name()).Msg("subscription handler panic")
 				}
 			}()
+			start := time.Now()
 			handler(result)
+			if d := time.Since(start); d > 2*time.Second {
+				c.logger.Warn().
+					Str("upstream", c.upstream.Name()).
+					Dur("handlerDuration", d).
+					Msg("subscription handler slow")
+			}
 		}()
 		return
 	}

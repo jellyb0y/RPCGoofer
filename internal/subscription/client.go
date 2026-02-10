@@ -304,6 +304,11 @@ func (s *clientSubscriber) SkipDedup() bool {
 	return false // Clients need deduplication
 }
 
+// DeliverFirst implements Subscriber interface
+func (s *clientSubscriber) DeliverFirst() bool {
+	return false
+}
+
 // parseBlockNumber extracts block number from newHeads result
 func parseBlockNumber(result json.RawMessage) (uint64, error) {
 	var header jsonrpc.BlockHeader

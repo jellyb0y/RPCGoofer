@@ -20,4 +20,7 @@ type Subscriber interface {
 	// SkipDedup returns true if this subscriber should receive all events
 	// without deduplication (e.g. for health monitoring)
 	SkipDedup() bool
+	// DeliverFirst returns true if this subscriber must be notified before others
+	// (e.g. state-updating subscribers so client handlers see consistent state)
+	DeliverFirst() bool
 }

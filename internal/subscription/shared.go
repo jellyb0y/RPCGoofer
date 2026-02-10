@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -356,8 +357,9 @@ func (s *SharedSubscription) cleanupUpstreamSub(upstreamName string, upSub *shar
 	s.mu.Unlock()
 }
 
-// broadcastEvent sends an event to all subscribers
-// isDuplicate indicates if this event was already seen from another upstream
+// broadcastEvent sends an event to all subscribers.
+// State-updating subscribers (e.g. health-monitor) are called first so block updates
+// are applied before client subscribers that may block in waitForMainBlock.
 func (s *SharedSubscription) broadcastEvent(event SubscriptionEvent, isDuplicate bool) {
 	s.mu.RLock()
 	subscribers := make([]Subscriber, 0, len(s.subscribers))
@@ -366,12 +368,35 @@ func (s *SharedSubscription) broadcastEvent(event SubscriptionEvent, isDuplicate
 	}
 	s.mu.RUnlock()
 
+	sort.Slice(subscribers, func(i, j int) bool {
+		di, dj := subscribers[i].DeliverFirst(), subscribers[j].DeliverFirst()
+		if di != dj {
+			return di
+		}
+		return subscribers[i].ID() < subscribers[j].ID()
+	})
+
+	s.logger.Debug().
+		Str("upstream", event.UpstreamName).
+		Int("subscribers", len(subscribers)).
+		Bool("isDuplicate", isDuplicate).
+		Msg("broadcastEvent start")
+
 	for _, sub := range subscribers {
-		// Skip duplicate events for subscribers that don't want them
 		if isDuplicate && !sub.SkipDedup() {
 			continue
 		}
+		subID := sub.ID()
+		start := time.Now()
 		sub.OnEvent(event)
+		dur := time.Since(start)
+		if dur > 100*time.Millisecond {
+			s.logger.Warn().
+				Str("subscriber", subID).
+				Str("upstream", event.UpstreamName).
+				Dur("duration", dur).
+				Msg("broadcastEvent subscriber took long")
+		}
 	}
 }
 
@@ -432,4 +457,9 @@ func (w *newHeadsSubscriberWrapper) ID() string {
 // SkipDedup implements Subscriber interface
 func (w *newHeadsSubscriberWrapper) SkipDedup() bool {
 	return true // HealthMonitor needs all events from all upstreams
+}
+
+// DeliverFirst implements Subscriber interface
+func (w *newHeadsSubscriberWrapper) DeliverFirst() bool {
+	return w.subscriber.DeliverFirst()
 }

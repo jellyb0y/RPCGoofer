@@ -87,6 +87,11 @@ func (hm *HealthMonitor) ID() string {
 	return "health-monitor"
 }
 
+// DeliverFirst implements NewHeadsSubscriber interface
+func (hm *HealthMonitor) DeliverFirst() bool {
+	return true
+}
+
 // OnBlock implements NewHeadsSubscriber interface
 func (hm *HealthMonitor) OnBlock(upstreamName string, result json.RawMessage) {
 	u, ok := hm.upstreamsByName[upstreamName]
