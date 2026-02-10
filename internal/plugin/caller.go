@@ -117,10 +117,10 @@ func (c *PoolCaller) executeWithRetry(req *jsonrpc.Request) (*jsonrpc.Response, 
 	b := c.pool.GetSelector()
 
 	if !c.retryConfig.Enabled {
-		return c.executeOnce(b, req, nil)
+		return c.executeOnce(b, req, c.pool.BuildBlockedMethodsExclude(req.Method))
 	}
 
-	tried := make(map[string]bool)
+	tried := c.pool.BuildBlockedMethodsExclude(req.Method)
 	var lastErr error
 	var lastResp *jsonrpc.Response
 
@@ -173,11 +173,21 @@ func (c *PoolCaller) executeWithRetry(req *jsonrpc.Request) (*jsonrpc.Response, 
 func (c *PoolCaller) executeBatchWithRetry(requests []*jsonrpc.Request) ([]*jsonrpc.Response, error) {
 	b := c.pool.GetSelector()
 
+	methods := make([]string, 0, len(requests))
+	seen := make(map[string]bool)
+	for _, req := range requests {
+		if !seen[req.Method] {
+			seen[req.Method] = true
+			methods = append(methods, req.Method)
+		}
+	}
+	blockedExclude := c.pool.BuildBlockedMethodsExcludeForBatch(methods)
+
 	if !c.retryConfig.Enabled {
-		return c.executeBatchOnce(b, requests, nil)
+		return c.executeBatchOnce(b, requests, blockedExclude)
 	}
 
-	tried := make(map[string]bool)
+	tried := blockedExclude
 	var lastErr error
 
 	maxAttempts := c.retryConfig.MaxAttempts

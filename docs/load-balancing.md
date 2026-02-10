@@ -133,7 +133,6 @@ When a request fails, RPCGofer can automatically retry on other available upstre
 **Non-Retryable Errors:**
 - Parse errors (-32700)
 - Invalid request (-32600)
-- Method not found (-32601)
 - Invalid params (-32602)
 - Execution reverted
 - Insufficient funds

@@ -330,9 +330,9 @@ func (e *Executor) executeBatchOnce(ctx context.Context, requests []*jsonrpc.Req
 }
 
 // ExecuteWithPool creates a temporary executor for a pool and executes.
-// Upstreams that have not caught up to the requested block (for block-dependent methods) are excluded from selection.
+// Upstreams that have not caught up to the requested block (for block-dependent methods) or have the method blocked are excluded from selection.
 func ExecuteWithPool(ctx context.Context, pool *upstream.Pool, req *jsonrpc.Request, cfg RetryConfig, logger zerolog.Logger) (*jsonrpc.Response, error) {
-	var initialExclude map[string]bool
+	initialExclude := pool.BuildBlockedMethodsExclude(req.Method)
 	if requestedBlock, ok := blockparam.GetRequestedBlockNumber(req.Method, req.Params); ok && requestedBlock > 0 {
 		for _, u := range pool.GetForRequest() {
 			if u.GetCurrentBlock() < requestedBlock {
@@ -349,15 +349,23 @@ func ExecuteWithPool(ctx context.Context, pool *upstream.Pool, req *jsonrpc.Requ
 }
 
 // ExecuteBatchWithPool creates a temporary executor for a pool and executes a batch.
-// Upstreams that have not caught up to the max requested block in the batch are excluded from selection.
+// Upstreams that have not caught up to the max requested block or block any batch method are excluded from selection.
 func ExecuteBatchWithPool(ctx context.Context, pool *upstream.Pool, requests []*jsonrpc.Request, cfg RetryConfig, logger zerolog.Logger) ([]*jsonrpc.Response, error) {
+	methods := make([]string, 0, len(requests))
+	seen := make(map[string]bool)
+	for _, req := range requests {
+		if !seen[req.Method] {
+			seen[req.Method] = true
+			methods = append(methods, req.Method)
+		}
+	}
+	initialExclude := pool.BuildBlockedMethodsExcludeForBatch(methods)
 	var maxBlock uint64
 	for _, req := range requests {
 		if b, ok := blockparam.GetRequestedBlockNumber(req.Method, req.Params); ok && b > maxBlock {
 			maxBlock = b
 		}
 	}
-	var initialExclude map[string]bool
 	if maxBlock > 0 {
 		for _, u := range pool.GetForRequest() {
 			if u.GetCurrentBlock() < maxBlock {

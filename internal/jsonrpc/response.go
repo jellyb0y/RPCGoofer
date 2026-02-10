@@ -139,14 +139,13 @@ func (r *Response) IsRetryableError() bool {
 
 	// Client errors that should NOT be retried
 	// These indicate problems with the request itself, not the server
+	// Note: MethodNotFound (-32601) is retryable - different upstreams may support different methods (e.g. debug/trace)
 	switch r.Error.Code {
-	case CodeParseError:      // -32700: Parse error
+	case CodeParseError:     // -32700: Parse error
 		return false
-	case CodeInvalidRequest:  // -32600: Invalid Request
+	case CodeInvalidRequest: // -32600: Invalid Request
 		return false
-	case CodeMethodNotFound:  // -32601: Method not found
-		return false
-	case CodeInvalidParams:   // -32602: Invalid params
+	case CodeInvalidParams:  // -32602: Invalid params
 		return false
 	}
 

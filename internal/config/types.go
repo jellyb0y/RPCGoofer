@@ -73,12 +73,13 @@ type GroupConfig struct {
 
 // UpstreamConfig represents a single upstream configuration
 type UpstreamConfig struct {
-	Name     string `json:"name"`
-	RPCURL   string `json:"rpcUrl"`
-	WSURL    string `json:"wsUrl"`
-	Weight   int    `json:"weight"`
-	Role     Role   `json:"role"`
-	PreferWS bool   `json:"preferWs"` // prefer WebSocket for RPC calls when both rpcUrl and wsUrl are configured (default: false)
+	Name           string   `json:"name"`
+	RPCURL         string   `json:"rpcUrl"`
+	WSURL          string   `json:"wsUrl"`
+	Weight         int      `json:"weight"`
+	Role           Role     `json:"role"`
+	PreferWS       bool     `json:"preferWs"`       // prefer WebSocket for RPC calls when both rpcUrl and wsUrl are configured (default: false)
+	BlockedMethods []string `json:"blockedMethods"` // methods this upstream does not support
 }
 
 // Default values

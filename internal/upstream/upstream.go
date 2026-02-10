@@ -17,12 +17,13 @@ import (
 
 // Upstream represents a single upstream RPC endpoint
 type Upstream struct {
-	name     string
-	rpcURL   string
-	wsURL    string
-	weight   int
-	role     Role
-	preferWS bool
+	name           string
+	rpcURL         string
+	wsURL          string
+	weight         int
+	role           Role
+	preferWS       bool
+	blockedMethods map[string]bool
 
 	httpClient *http.Client
 	status     *Status
@@ -39,6 +40,7 @@ type Config struct {
 	Weight         int
 	Role           Role
 	PreferWS       bool
+	BlockedMethods []string
 	RequestTimeout time.Duration
 	Logger         zerolog.Logger
 }
@@ -57,16 +59,22 @@ func NewUpstream(cfg Config) *Upstream {
 		Timeout:   cfg.RequestTimeout,
 	}
 
+	blockedMethods := make(map[string]bool)
+	for _, m := range cfg.BlockedMethods {
+		blockedMethods[m] = true
+	}
+
 	return &Upstream{
-		name:       cfg.Name,
-		rpcURL:     cfg.RPCURL,
-		wsURL:      cfg.WSURL,
-		weight:     cfg.Weight,
-		role:       cfg.Role,
-		preferWS:   cfg.PreferWS,
-		httpClient: httpClient,
-		status:     NewStatus(),
-		logger:     cfg.Logger.With().Str("upstream", cfg.Name).Logger(),
+		name:           cfg.Name,
+		rpcURL:         cfg.RPCURL,
+		wsURL:          cfg.WSURL,
+		weight:         cfg.Weight,
+		role:           cfg.Role,
+		preferWS:       cfg.PreferWS,
+		blockedMethods: blockedMethods,
+		httpClient:     httpClient,
+		status:         NewStatus(),
+		logger:         cfg.Logger.With().Str("upstream", cfg.Name).Logger(),
 	}
 }
 
@@ -79,6 +87,7 @@ func NewUpstreamFromConfig(cfg config.UpstreamConfig, globalCfg *config.Config, 
 		Weight:         cfg.Weight,
 		Role:           RoleFromConfig(cfg.Role),
 		PreferWS:       cfg.PreferWS,
+		BlockedMethods: cfg.BlockedMethods,
 		RequestTimeout: globalCfg.GetRequestTimeoutDuration(),
 		Logger:         logger,
 	})
@@ -207,6 +216,11 @@ func (u *Upstream) HasRPC() bool {
 // HasWS returns true if WebSocket URL is configured
 func (u *Upstream) HasWS() bool {
 	return u.wsURL != ""
+}
+
+// IsMethodBlocked returns true if this upstream does not support the given method
+func (u *Upstream) IsMethodBlocked(method string) bool {
+	return u.blockedMethods != nil && u.blockedMethods[method]
 }
 
 // Execute sends a JSON-RPC request and returns the response.

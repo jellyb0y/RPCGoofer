@@ -248,7 +248,6 @@ Note: Subscription methods (`eth_subscribe`, `eth_unsubscribe`) in batch are pro
 ### Non-Retryable Errors
 - Parse errors (-32700)
 - Invalid request (-32600)
-- Method not found (-32601)
 - Invalid params (-32602)
 - Execution reverted
 - Insufficient funds

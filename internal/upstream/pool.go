@@ -365,3 +365,36 @@ func (p *Pool) RecordMethods(methods []string) {
 func (p *Pool) GetMethodStats() *MethodStats {
 	return p.methodStats
 }
+
+// BuildBlockedMethodsExclude returns upstream names to exclude for the given method.
+// Upstreams that have this method in their blockedMethods list will be excluded.
+func (p *Pool) BuildBlockedMethodsExclude(method string) map[string]bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	exclude := make(map[string]bool)
+	for _, u := range p.upstreams {
+		if u.IsMethodBlocked(method) {
+			exclude[u.Name()] = true
+		}
+	}
+	return exclude
+}
+
+// BuildBlockedMethodsExcludeForBatch returns upstream names to exclude for the given methods.
+// Upstreams that block any of the methods will be excluded (batch goes to one upstream).
+func (p *Pool) BuildBlockedMethodsExcludeForBatch(methods []string) map[string]bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	exclude := make(map[string]bool)
+	for _, u := range p.upstreams {
+		for _, m := range methods {
+			if u.IsMethodBlocked(m) {
+				exclude[u.Name()] = true
+				break
+			}
+		}
+	}
+	return exclude
+}
