@@ -390,7 +390,7 @@ func (s *SharedSubscription) broadcastEvent(event SubscriptionEvent, isDuplicate
 		start := time.Now()
 		sub.OnEvent(event)
 		dur := time.Since(start)
-		if dur > 100*time.Millisecond {
+		if dur > time.Second {
 			s.logger.Warn().
 				Str("subscriber", subID).
 				Str("upstream", event.UpstreamName).
