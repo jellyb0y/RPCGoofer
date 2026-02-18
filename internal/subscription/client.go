@@ -18,7 +18,15 @@ import (
 const (
 	// waitForMainBlockPollInterval is how often to check if main has the block
 	waitForMainBlockPollInterval = 50 * time.Millisecond
+	// eventQueueSize is the buffer size for per-subscriber event queue (fallback newHeads)
+	eventQueueSize = 256
 )
+
+// pendingEvent holds an event that needs waitForMainBlock before delivery
+type pendingEvent struct {
+	blockNum   uint64
+	notifBytes []byte
+}
 
 // ClientSession manages subscriptions for a single WebSocket client
 type ClientSession struct {
@@ -73,12 +81,13 @@ func (cs *ClientSession) Subscribe(ctx context.Context, subType SubscriptionType
 
 	// Create subscriber for this subscription
 	subscriber := &clientSubscriber{
-		id:        subID,
-		subType:   subType,
-		params:    params,
-		session:   cs,
-		sendChan:  make(chan []byte, 100),
-		closeChan: make(chan struct{}),
+		id:         subID,
+		subType:    subType,
+		params:     params,
+		session:    cs,
+		sendChan:   make(chan []byte, 100),
+		eventQueue: make(chan *pendingEvent, eventQueueSize),
+		closeChan:  make(chan struct{}),
 	}
 
 	// Check if we have SharedSubscriptionManager
@@ -101,8 +110,10 @@ func (cs *ClientSession) Subscribe(ctx context.Context, subType SubscriptionType
 	}
 	cs.mu.Unlock()
 
-	// Start sender goroutine
+	// Start sender and delivery worker goroutines
 	go cs.sendToClient(subscriber)
+	subscriber.deliveryWg.Add(1)
+	go cs.deliveryWorker(subscriber)
 
 	cs.logger.Debug().
 		Str("subID", subID).
@@ -188,14 +199,16 @@ func (cs *ClientSession) sendToClient(subscriber *clientSubscriber) {
 
 // clientSubscriber implements Subscriber interface for a client subscription
 type clientSubscriber struct {
-	id        string
-	subType   SubscriptionType
-	params    json.RawMessage
-	session   *ClientSession
-	sendChan  chan []byte
-	closeChan chan struct{}
-	closed    bool
-	mu        sync.Mutex
+	id         string
+	subType    SubscriptionType
+	params     json.RawMessage
+	session    *ClientSession
+	sendChan   chan []byte
+	eventQueue chan *pendingEvent
+	closeChan  chan struct{}
+	closed     bool
+	mu         sync.Mutex
+	deliveryWg sync.WaitGroup
 }
 
 // ID implements Subscriber interface
@@ -212,27 +225,6 @@ func (s *clientSubscriber) OnEvent(event SubscriptionEvent) {
 	}
 	s.mu.Unlock()
 
-	// For newHeads from fallback upstreams, wait until main has the block
-	// This prevents sending block notifications before main upstreams have the block,
-	// which would cause RPC requests (routed to main) to fail with "block not found"
-	if event.SubType == SubTypeNewHeads {
-		// Check if this is from a fallback upstream
-		u := s.session.pool.GetByName(event.UpstreamName)
-		if u != nil && u.IsFallback() {
-			blockNum, err := parseBlockNumber(event.Result)
-			if err != nil {
-				s.session.logger.Warn().Err(err).Msg("failed to parse block number from newHeads")
-			} else {
-				// Wait for main to have the block
-				if !s.waitForMainBlock(blockNum) {
-					// Session or subscriber is closing
-					return
-				}
-			}
-		}
-	}
-
-	// Create client notification with client's subscription ID
 	clientNotification := NewNotification(s.id, event.Result)
 	notifBytes, err := clientNotification.Bytes()
 	if err != nil {
@@ -240,14 +232,63 @@ func (s *clientSubscriber) OnEvent(event SubscriptionEvent) {
 		return
 	}
 
-	// Send to client via channel
+	// For newHeads from fallback upstreams, enqueue for async delivery after main has the block
+	if event.SubType == SubTypeNewHeads {
+		u := s.session.pool.GetByName(event.UpstreamName)
+		if u != nil && u.IsFallback() {
+			blockNum, err := parseBlockNumber(event.Result)
+			if err != nil {
+				s.session.logger.Warn().Err(err).Msg("failed to parse block number from newHeads")
+				return
+			}
+			ev := &pendingEvent{blockNum: blockNum, notifBytes: notifBytes}
+			select {
+			case s.eventQueue <- ev:
+			case <-s.closeChan:
+			case <-s.session.closeChan:
+			default:
+				s.session.logger.Warn().Str("subID", s.id).Msg("event queue full, dropping fallback newHeads")
+			}
+			return
+		}
+	}
+
+	// Direct send for main upstreams or non-newHeads
 	select {
 	case s.sendChan <- notifBytes:
 	case <-s.closeChan:
 	case <-s.session.closeChan:
 	default:
-		// Channel full, drop message
 		s.session.logger.Warn().Str("subID", s.id).Msg("send channel full, dropping event")
+	}
+}
+
+// deliveryWorker processes fallback newHeads from eventQueue: waits for main block, then sends to client
+func (cs *ClientSession) deliveryWorker(sub *clientSubscriber) {
+	defer sub.deliveryWg.Done()
+	for {
+		select {
+		case ev, ok := <-sub.eventQueue:
+			if !ok {
+				return
+			}
+			if !sub.waitForMainBlock(ev.blockNum) {
+				continue
+			}
+			select {
+			case sub.sendChan <- ev.notifBytes:
+			case <-sub.closeChan:
+				return
+			case <-cs.closeChan:
+				return
+			default:
+				cs.logger.Warn().Str("subID", sub.id).Msg("send channel full, dropping event after waitForMainBlock")
+			}
+		case <-sub.closeChan:
+			return
+		case <-cs.closeChan:
+			return
+		}
 	}
 }
 
@@ -268,12 +309,15 @@ func (s *clientSubscriber) waitForMainBlock(blockNum uint64) bool {
 	ticker := time.NewTicker(waitForMainBlockPollInterval)
 	defer ticker.Stop()
 
+	blockNotify := pool.GetBlockNotifyChan()
+
 	for {
 		select {
 		case <-s.closeChan:
 			return false
 		case <-s.session.closeChan:
 			return false
+		case <-blockNotify:
 		case <-ticker.C:
 			// Main has the block now
 			if pool.GetMainMaxBlock() >= blockNum {
@@ -291,12 +335,16 @@ func (s *clientSubscriber) waitForMainBlock(blockNum uint64) bool {
 // Close closes the subscriber
 func (s *clientSubscriber) Close() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return
 	}
 	s.closed = true
 	close(s.closeChan)
+	s.mu.Unlock()
+
+	close(s.eventQueue)
+	s.deliveryWg.Wait()
 }
 
 // SkipDedup implements Subscriber interface

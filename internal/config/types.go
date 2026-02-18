@@ -25,11 +25,16 @@ type Config struct {
 	LagRecoveryTimeout        int           `json:"lagRecoveryTimeout"`
 	UpstreamMessageTimeout    int           `json:"upstreamMessageTimeout"`    // ms - timeout for receiving messages from upstream WebSocket
 	UpstreamReconnectInterval int           `json:"upstreamReconnectInterval"` // ms - interval between reconnection attempts
+	UpstreamPingInterval      int           `json:"upstreamPingInterval"`      // ms - interval for WebSocket ping to upstream; 0 = use default
 	DedupCacheSize            int           `json:"dedupCacheSize"`
 	MaxSubscriptionsPerClient int           `json:"maxSubscriptionsPerClient"`
-	RetryEnabled              bool           `json:"retryEnabled"`
-	RetryMaxAttempts          int            `json:"retryMaxAttempts"`
-	WSSendTimeout             int            `json:"wsSendTimeout"`             // ms - timeout for sending to client WebSocket; 0 = use default
+	RetryEnabled                 bool           `json:"retryEnabled"`
+	RetryMaxAttempts              int            `json:"retryMaxAttempts"`
+	CircuitBreakerEnabled         bool           `json:"circuitBreakerEnabled"`
+	CircuitBreakerFailureThreshold int           `json:"circuitBreakerFailureThreshold"`
+	CircuitBreakerRecoveryTimeout  int           `json:"circuitBreakerRecoveryTimeout"`
+	CircuitBreakerHalfOpenRequests int           `json:"circuitBreakerHalfOpenRequests"`
+	WSSendTimeout                int            `json:"wsSendTimeout"`             // ms - timeout for sending to client WebSocket; 0 = use default
 	Cache                     *CacheConfig    `json:"cache,omitempty"`
 	Plugins                   *PluginConfig   `json:"plugins,omitempty"`
 	Batching                  *BatchingConfig `json:"batching,omitempty"`
@@ -97,10 +102,15 @@ const (
 	DefaultLagRecoveryTimeout        = 2000  // ms - time for lagging upstreams to catch up before marking unhealthy
 	DefaultUpstreamMessageTimeout    = 60000 // ms - timeout for receiving messages from upstream WebSocket (60s)
 	DefaultUpstreamReconnectInterval = 5000  // ms - interval between reconnection attempts (5s)
+	DefaultUpstreamPingInterval      = 20000 // ms - interval for WebSocket ping to upstream (20s)
 	DefaultDedupCacheSize            = 10000
 	DefaultMaxSubscriptionsPerClient = 100
-	DefaultRetryEnabled              = true
-	DefaultRetryMaxAttempts          = 3
+	DefaultRetryEnabled                 = true
+	DefaultRetryMaxAttempts             = 3
+	DefaultCircuitBreakerEnabled        = true
+	DefaultCircuitBreakerFailureThreshold = 5
+	DefaultCircuitBreakerRecoveryTimeout  = 30000  // ms
+	DefaultCircuitBreakerHalfOpenRequests = 2
 	DefaultUpstreamWeight            = 1
 	DefaultUpstreamRole              = RoleMain
 	DefaultPluginDirectory           = "./plugins"
@@ -143,6 +153,22 @@ func (c *Config) GetUpstreamMessageTimeoutDuration() time.Duration {
 // GetUpstreamReconnectIntervalDuration returns upstream reconnect interval as time.Duration
 func (c *Config) GetUpstreamReconnectIntervalDuration() time.Duration {
 	return time.Duration(c.UpstreamReconnectInterval) * time.Millisecond
+}
+
+// GetUpstreamPingIntervalDuration returns upstream ping interval as time.Duration
+func (c *Config) GetUpstreamPingIntervalDuration() time.Duration {
+	if c.UpstreamPingInterval <= 0 {
+		return time.Duration(DefaultUpstreamPingInterval) * time.Millisecond
+	}
+	return time.Duration(c.UpstreamPingInterval) * time.Millisecond
+}
+
+// GetCircuitBreakerRecoveryTimeoutDuration returns circuit breaker recovery timeout as time.Duration
+func (c *Config) GetCircuitBreakerRecoveryTimeoutDuration() time.Duration {
+	if c.CircuitBreakerRecoveryTimeout <= 0 {
+		return time.Duration(DefaultCircuitBreakerRecoveryTimeout) * time.Millisecond
+	}
+	return time.Duration(c.CircuitBreakerRecoveryTimeout) * time.Millisecond
 }
 
 // GetWSSendTimeoutDuration returns WebSocket send timeout as time.Duration

@@ -39,8 +39,9 @@ type HealthMonitor struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	mu       sync.RWMutex
-	maxBlock uint64
+	mu              sync.RWMutex
+	maxBlock        uint64
+	blockNotifyChan chan struct{}
 }
 
 // NewHealthMonitor creates a new HealthMonitor
@@ -64,6 +65,7 @@ func NewHealthMonitor(upstreams []*Upstream, blockLagThreshold uint64, lagRecove
 		logger:             logger,
 		ctx:                ctx,
 		cancel:             cancel,
+		blockNotifyChan:    make(chan struct{}, 10),
 	}
 }
 
@@ -116,6 +118,10 @@ func (hm *HealthMonitor) OnBlock(upstreamName string, result json.RawMessage) {
 	isNewMax := hm.updateMaxBlock(blockNum)
 
 	if isNewMax {
+		select {
+		case hm.blockNotifyChan <- struct{}{}:
+		default:
+		}
 		// New max block - give other upstreams time to catch up
 		hm.scheduleLagCheck(blockNum)
 	}
@@ -472,6 +478,10 @@ func (hm *HealthMonitor) pollBlockNumber(u *Upstream) {
 	isNewMax := hm.updateMaxBlock(blockNum)
 
 	if isNewMax {
+		select {
+		case hm.blockNotifyChan <- struct{}{}:
+		default:
+		}
 		// New max block - give other upstreams time to catch up
 		hm.scheduleLagCheck(blockNum)
 	}
@@ -503,6 +513,11 @@ func (hm *HealthMonitor) GetMaxBlock() uint64 {
 	hm.mu.RLock()
 	defer hm.mu.RUnlock()
 	return hm.maxBlock
+}
+
+// BlockNotifyChan returns the channel that receives a signal when a new max block is seen
+func (hm *HealthMonitor) BlockNotifyChan() <-chan struct{} {
+	return hm.blockNotifyChan
 }
 
 // scheduleLagCheck schedules a health check for a specific block after lagRecoveryTimeout

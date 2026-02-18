@@ -25,11 +25,12 @@ type subParamsEntry struct {
 // UpstreamWSClient owns a single WebSocket connection for an upstream.
 // It multiplexes RPC request/response and eth_subscribe events on one connection.
 type UpstreamWSClient struct {
-	wsURL            string
-	messageTimeout   time.Duration
+	wsURL             string
+	messageTimeout    time.Duration
 	reconnectInterval time.Duration
-	upstream         *Upstream
-	logger           zerolog.Logger
+	pingInterval      time.Duration
+	upstream          *Upstream
+	logger            zerolog.Logger
 
 	conn   *websocket.Conn
 	connMu sync.RWMutex
@@ -49,23 +50,27 @@ type UpstreamWSClient struct {
 	lastReadAt  time.Time
 	readCountMu sync.Mutex
 
+	eventChan chan []byte
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
 // NewUpstreamWSClient creates a new WebSocket client for an upstream
-func NewUpstreamWSClient(wsURL string, messageTimeout time.Duration, reconnectInterval time.Duration, u *Upstream, logger zerolog.Logger) *UpstreamWSClient {
+func NewUpstreamWSClient(wsURL string, messageTimeout time.Duration, reconnectInterval time.Duration, pingInterval time.Duration, u *Upstream, logger zerolog.Logger) *UpstreamWSClient {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &UpstreamWSClient{
 		wsURL:             wsURL,
 		messageTimeout:    messageTimeout,
 		reconnectInterval: reconnectInterval,
+		pingInterval:      pingInterval,
 		upstream:          u,
 		logger:            logger,
 		pending:           make(map[int64]chan *jsonrpc.Response),
 		subHandlers:       make(map[string]subscriptionHandler),
 		subParams:         make(map[string]subParamsEntry),
+		eventChan:         make(chan []byte, 1024),
 		ctx:               ctx,
 		cancel:            cancel,
 	}
@@ -91,11 +96,56 @@ func (c *UpstreamWSClient) Connect(ctx context.Context) error {
 	c.conn = conn
 	c.connMu.Unlock()
 
+	c.setPongHandler(conn)
 	atomic.StoreUint32(&c.firstEventAfterConnect, 0)
 	c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket connected")
 	c.wg.Add(1)
+	go c.dispatchWorker()
+	c.wg.Add(1)
 	go c.readLoop()
+	if c.pingInterval > 0 {
+		c.wg.Add(1)
+		go c.pingLoop()
+	}
 	return nil
+}
+
+func (c *UpstreamWSClient) setPongHandler(conn *websocket.Conn) {
+	readTimeout := c.messageTimeout
+	if readTimeout == 0 {
+		readTimeout = 60 * time.Second
+	}
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
+		return nil
+	})
+}
+
+func (c *UpstreamWSClient) pingLoop() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(c.pingInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			c.connMu.RLock()
+			conn := c.conn
+			c.connMu.RUnlock()
+			if conn == nil {
+				return
+			}
+			c.writeMu.Lock()
+			err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second))
+			c.writeMu.Unlock()
+			if err != nil {
+				c.logger.Debug().Str("upstream", c.upstream.Name()).Err(err).Msg("ping write failed")
+				return
+			}
+		}
+	}
 }
 
 // Connected returns true if the WebSocket connection is established
@@ -124,6 +174,7 @@ func (c *UpstreamWSClient) Close() {
 	c.pending = make(map[int64]chan *jsonrpc.Response)
 	c.pendingMu.Unlock()
 
+	close(c.eventChan)
 	c.wg.Wait()
 	c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket disconnected")
 }
@@ -465,7 +516,45 @@ func (c *UpstreamWSClient) readLoop() {
 		c.lastReadAt = time.Now()
 		c.readCountMu.Unlock()
 
-		c.dispatchMessage(data)
+		if c.isSubscriptionMessage(data) {
+			select {
+			case <-c.ctx.Done():
+				return
+			case c.eventChan <- data:
+			default:
+				c.logger.Warn().Str("upstream", c.upstream.Name()).Msg("event queue full, dropping subscription message")
+			}
+		} else {
+			c.dispatchMessage(data)
+		}
+	}
+}
+
+func (c *UpstreamWSClient) isSubscriptionMessage(data []byte) bool {
+	var base struct {
+		Method string          `json:"method"`
+		Params *struct {
+			Subscription string `json:"subscription"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(data, &base); err != nil {
+		return false
+	}
+	return base.Method == "eth_subscription" && base.Params != nil
+}
+
+func (c *UpstreamWSClient) dispatchWorker() {
+	defer c.wg.Done()
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case data, ok := <-c.eventChan:
+			if !ok {
+				return
+			}
+			c.dispatchMessage(data)
+		}
 	}
 }
 
@@ -611,6 +700,7 @@ func (c *UpstreamWSClient) reconnect() bool {
 		c.conn = conn
 		c.connMu.Unlock()
 
+		c.setPongHandler(conn)
 		atomic.StoreUint32(&c.firstEventAfterConnect, 0)
 		c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket reconnected successfully")
 

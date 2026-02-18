@@ -358,8 +358,9 @@ func (s *SharedSubscription) cleanupUpstreamSub(upstreamName string, upSub *shar
 }
 
 // broadcastEvent sends an event to all subscribers.
-// State-updating subscribers (e.g. health-monitor) are called first so block updates
-// are applied before client subscribers that may block in waitForMainBlock.
+// Internal subscribers (DeliverFirst, e.g. health-monitor) are called first synchronously
+// so block updates are applied before client subscribers. Client subscribers receive
+// via non-blocking enqueue to their event queues.
 func (s *SharedSubscription) broadcastEvent(event SubscriptionEvent, isDuplicate bool) {
 	s.mu.RLock()
 	subscribers := make([]Subscriber, 0, len(s.subscribers))
@@ -382,9 +383,9 @@ func (s *SharedSubscription) broadcastEvent(event SubscriptionEvent, isDuplicate
 		Bool("isDuplicate", isDuplicate).
 		Msg("broadcastEvent start")
 
-	for _, sub := range subscribers {
+	deliver := func(sub Subscriber) {
 		if isDuplicate && !sub.SkipDedup() {
-			continue
+			return
 		}
 		subID := sub.ID()
 		start := time.Now()
@@ -396,6 +397,19 @@ func (s *SharedSubscription) broadcastEvent(event SubscriptionEvent, isDuplicate
 				Str("upstream", event.UpstreamName).
 				Dur("duration", dur).
 				Msg("broadcastEvent subscriber took long")
+		}
+	}
+
+	// Internal subscribers (HealthMonitor etc.) - synchronous, always first
+	for _, sub := range subscribers {
+		if sub.DeliverFirst() {
+			deliver(sub)
+		}
+	}
+	// Client subscribers - non-blocking (OnEvent enqueues to eventQueue)
+	for _, sub := range subscribers {
+		if !sub.DeliverFirst() {
+			deliver(sub)
 		}
 	}
 }

@@ -67,6 +67,15 @@ func applyDefaults(cfg *Config) {
 	if cfg.UpstreamReconnectInterval == 0 {
 		cfg.UpstreamReconnectInterval = DefaultUpstreamReconnectInterval
 	}
+	if cfg.CircuitBreakerFailureThreshold == 0 {
+		cfg.CircuitBreakerFailureThreshold = DefaultCircuitBreakerFailureThreshold
+	}
+	if cfg.CircuitBreakerRecoveryTimeout == 0 {
+		cfg.CircuitBreakerRecoveryTimeout = DefaultCircuitBreakerRecoveryTimeout
+	}
+	if cfg.CircuitBreakerHalfOpenRequests == 0 {
+		cfg.CircuitBreakerHalfOpenRequests = DefaultCircuitBreakerHalfOpenRequests
+	}
 	if cfg.DedupCacheSize == 0 {
 		cfg.DedupCacheSize = DefaultDedupCacheSize
 	}
@@ -240,10 +249,11 @@ func validate(cfg *Config) error {
 	return nil
 }
 
-// configWithRetryDefault is used for proper default handling of retryEnabled
+// configWithRetryDefault is used for proper default handling of bool fields
 type configWithRetryDefault struct {
 	Config
-	RetryEnabledPtr *bool `json:"retryEnabled"`
+	RetryEnabledPtr            *bool `json:"retryEnabled"`
+	CircuitBreakerEnabledPtr   *bool `json:"circuitBreakerEnabled"`
 }
 
 // Load reads and parses the configuration file with proper bool default handling
@@ -266,6 +276,12 @@ func LoadWithDefaults(path string) (*Config, error) {
 		cfg.RetryEnabled = *rawCfg.RetryEnabledPtr
 	} else {
 		cfg.RetryEnabled = DefaultRetryEnabled
+	}
+	// Handle circuitBreakerEnabled default
+	if rawCfg.CircuitBreakerEnabledPtr != nil {
+		cfg.CircuitBreakerEnabled = *rawCfg.CircuitBreakerEnabledPtr
+	} else {
+		cfg.CircuitBreakerEnabled = DefaultCircuitBreakerEnabled
 	}
 
 	applyDefaults(cfg)

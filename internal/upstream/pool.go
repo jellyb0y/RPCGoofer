@@ -27,6 +27,7 @@ type Pool struct {
 	mu                    sync.RWMutex
 	messageTimeout        time.Duration
 	reconnectInterval     time.Duration
+	pingInterval          time.Duration
 	ctx                   context.Context
 	cancel                context.CancelFunc
 	onUpstreamWSConnected func(*Upstream)
@@ -63,6 +64,7 @@ func NewPool(groupCfg config.GroupConfig, globalCfg *config.Config, logger zerol
 		logger:            poolLogger,
 		messageTimeout:    globalCfg.GetUpstreamMessageTimeoutDuration(),
 		reconnectInterval: globalCfg.GetUpstreamReconnectIntervalDuration(),
+		pingInterval:      globalCfg.GetUpstreamPingIntervalDuration(),
 	}
 }
 
@@ -117,7 +119,7 @@ func (p *Pool) runWSRetry(u *Upstream) {
 			return
 		default:
 		}
-		err := u.StartWS(p.ctx, p.messageTimeout, p.reconnectInterval)
+		err := u.StartWS(p.ctx, p.messageTimeout, p.reconnectInterval, p.pingInterval)
 		if err == nil {
 			if p.onUpstreamWSConnected != nil {
 				p.onUpstreamWSConnected(u)
@@ -170,28 +172,28 @@ func (p *Pool) GetHealthy() []*Upstream {
 	return result
 }
 
-// GetHealthyMain returns healthy main upstreams
+// GetHealthyMain returns healthy main upstreams (excluding those with circuit breaker open)
 func (p *Pool) GetHealthyMain() []*Upstream {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	result := make([]*Upstream, 0)
 	for _, u := range p.upstreams {
-		if u.IsHealthy() && u.IsMain() {
+		if u.IsHealthy() && u.IsMain() && u.AllowRequest() {
 			result = append(result, u)
 		}
 	}
 	return result
 }
 
-// GetHealthyFallback returns healthy fallback upstreams
+// GetHealthyFallback returns healthy fallback upstreams (excluding those with circuit breaker open)
 func (p *Pool) GetHealthyFallback() []*Upstream {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	result := make([]*Upstream, 0)
 	for _, u := range p.upstreams {
-		if u.IsHealthy() && u.IsFallback() {
+		if u.IsHealthy() && u.IsFallback() && u.AllowRequest() {
 			result = append(result, u)
 		}
 	}
@@ -347,6 +349,11 @@ func (p *Pool) SetBatchStats(provider BatchStatsProvider) {
 // GetNewHeadsProvider returns the NewHeadsProvider
 func (p *Pool) GetNewHeadsProvider() NewHeadsProvider {
 	return p.newHeadsProvider
+}
+
+// GetBlockNotifyChan returns the channel that signals when a new max block is seen
+func (p *Pool) GetBlockNotifyChan() <-chan struct{} {
+	return p.monitor.BlockNotifyChan()
 }
 
 // RecordMethod increments the method call counter

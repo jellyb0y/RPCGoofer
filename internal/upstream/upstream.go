@@ -25,24 +25,26 @@ type Upstream struct {
 	preferWS       bool
 	blockedMethods map[string]bool
 
-	httpClient *http.Client
-	status     *Status
-	logger     zerolog.Logger
+	httpClient     *http.Client
+	status         *Status
+	circuitBreaker *CircuitBreaker
+	logger         zerolog.Logger
 
 	wsClient *UpstreamWSClient
 }
 
 // Config for creating a new Upstream
 type Config struct {
-	Name           string
-	RPCURL         string
-	WSURL          string
-	Weight         int
-	Role           Role
-	PreferWS       bool
-	BlockedMethods []string
-	RequestTimeout time.Duration
-	Logger         zerolog.Logger
+	Name               string
+	RPCURL             string
+	WSURL              string
+	Weight             int
+	Role               Role
+	PreferWS           bool
+	BlockedMethods     []string
+	RequestTimeout     time.Duration
+	CircuitBreakerCfg  CircuitBreakerConfig
+	Logger             zerolog.Logger
 }
 
 // NewUpstream creates a new Upstream instance
@@ -64,6 +66,7 @@ func NewUpstream(cfg Config) *Upstream {
 		blockedMethods[m] = true
 	}
 
+	cb := NewCircuitBreaker(cfg.CircuitBreakerCfg)
 	return &Upstream{
 		name:           cfg.Name,
 		rpcURL:         cfg.RPCURL,
@@ -74,6 +77,7 @@ func NewUpstream(cfg Config) *Upstream {
 		blockedMethods: blockedMethods,
 		httpClient:     httpClient,
 		status:         NewStatus(),
+		circuitBreaker: cb,
 		logger:         cfg.Logger.With().Str("upstream", cfg.Name).Logger(),
 	}
 }
@@ -81,16 +85,26 @@ func NewUpstream(cfg Config) *Upstream {
 // NewUpstreamFromConfig creates an Upstream from config
 func NewUpstreamFromConfig(cfg config.UpstreamConfig, globalCfg *config.Config, logger zerolog.Logger) *Upstream {
 	return NewUpstream(Config{
-		Name:           cfg.Name,
-		RPCURL:         cfg.RPCURL,
-		WSURL:          cfg.WSURL,
-		Weight:         cfg.Weight,
-		Role:           RoleFromConfig(cfg.Role),
-		PreferWS:       cfg.PreferWS,
-		BlockedMethods: cfg.BlockedMethods,
-		RequestTimeout: globalCfg.GetRequestTimeoutDuration(),
-		Logger:         logger,
+		Name:              cfg.Name,
+		RPCURL:            cfg.RPCURL,
+		WSURL:             cfg.WSURL,
+		Weight:            cfg.Weight,
+		Role:              RoleFromConfig(cfg.Role),
+		PreferWS:          cfg.PreferWS,
+		BlockedMethods:    cfg.BlockedMethods,
+		RequestTimeout:    globalCfg.GetRequestTimeoutDuration(),
+		CircuitBreakerCfg: buildCircuitBreakerConfig(globalCfg),
+		Logger:            logger,
 	})
+}
+
+func buildCircuitBreakerConfig(cfg *config.Config) CircuitBreakerConfig {
+	return CircuitBreakerConfig{
+		Enabled:             cfg.CircuitBreakerEnabled,
+		FailureThreshold:    cfg.CircuitBreakerFailureThreshold,
+		RecoveryTimeout:     cfg.GetCircuitBreakerRecoveryTimeoutDuration(),
+		HalfOpenMaxRequests: cfg.CircuitBreakerHalfOpenRequests,
+	}
 }
 
 // Name returns the upstream name
@@ -131,6 +145,14 @@ func (u *Upstream) IsFallback() bool {
 // IsHealthy returns the health status
 func (u *Upstream) IsHealthy() bool {
 	return u.status.IsHealthy()
+}
+
+// AllowRequest returns true if the circuit breaker allows a request to this upstream
+func (u *Upstream) AllowRequest() bool {
+	if u.circuitBreaker == nil {
+		return true
+	}
+	return u.circuitBreaker.AllowRequest()
 }
 
 // SetHealthy sets the health status
@@ -227,6 +249,9 @@ func (u *Upstream) IsMethodBlocked(method string) bool {
 // When preferWS is true and both rpcUrl and wsUrl are configured, uses WebSocket.
 // Otherwise prefers HTTP RPC, falls back to WebSocket if HTTP is not available.
 func (u *Upstream) Execute(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
+	if !u.AllowRequest() {
+		return nil, fmt.Errorf("circuit breaker open for upstream %s", u.name)
+	}
 	if u.preferWS && u.HasWS() {
 		return u.ExecuteWS(ctx, req)
 	}
@@ -241,6 +266,9 @@ func (u *Upstream) Execute(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.
 
 // ExecuteHTTP sends a JSON-RPC request via HTTP
 func (u *Upstream) ExecuteHTTP(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
+	if !u.AllowRequest() {
+		return nil, fmt.Errorf("circuit breaker open for upstream %s", u.name)
+	}
 	if u.rpcURL == "" {
 		return nil, fmt.Errorf("HTTP RPC URL not configured")
 	}
@@ -259,6 +287,7 @@ func (u *Upstream) ExecuteHTTP(ctx context.Context, req *jsonrpc.Request) (*json
 
 	resp, err := u.httpClient.Do(httpReq)
 	if err != nil {
+		u.circuitBreaker.RecordFailure()
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -268,24 +297,31 @@ func (u *Upstream) ExecuteHTTP(ctx context.Context, req *jsonrpc.Request) (*json
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		u.circuitBreaker.RecordFailure()
 		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		u.circuitBreaker.RecordFailure()
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	rpcResp, err := jsonrpc.ParseResponse(body)
 	if err != nil {
+		u.circuitBreaker.RecordFailure()
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
+	u.circuitBreaker.RecordSuccess()
 	return rpcResp, nil
 }
 
 // ExecuteBatch sends a batch of JSON-RPC requests via HTTP
 func (u *Upstream) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request) ([]*jsonrpc.Response, error) {
+	if !u.AllowRequest() {
+		return nil, fmt.Errorf("circuit breaker open for upstream %s", u.name)
+	}
 	if u.rpcURL == "" {
 		return nil, fmt.Errorf("HTTP RPC URL not configured")
 	}
@@ -302,39 +338,53 @@ func (u *Upstream) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := u.httpClient.Do(httpReq)
+	httpResp, err := u.httpClient.Do(httpReq)
 	if err != nil {
+		u.circuitBreaker.RecordFailure()
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer httpResp.Body.Close()
 
 	// Increment request counter (one HTTP call = one request to upstream)
 	u.IncrementRequestCount()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
+	if httpResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(httpResp.Body)
+		u.circuitBreaker.RecordFailure()
+		return nil, fmt.Errorf("HTTP error %d: %s", httpResp.StatusCode, string(body))
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
+		u.circuitBreaker.RecordFailure()
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	responses, _, err := jsonrpc.ParseBatchResponse(body)
 	if err != nil {
+		u.circuitBreaker.RecordFailure()
 		return nil, fmt.Errorf("failed to parse batch response: %w", err)
 	}
 
+	u.circuitBreaker.RecordSuccess()
 	return responses, nil
 }
 
 // ExecuteWS sends a JSON-RPC request via WebSocket
 func (u *Upstream) ExecuteWS(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
+	if !u.AllowRequest() {
+		return nil, fmt.Errorf("circuit breaker open for upstream %s", u.name)
+	}
 	if u.wsClient == nil {
 		return nil, fmt.Errorf("WebSocket not connected")
 	}
-	return u.wsClient.SendRequest(ctx, req)
+	resp, err := u.wsClient.SendRequest(ctx, req)
+	if err != nil {
+		u.circuitBreaker.RecordFailure()
+		return nil, err
+	}
+	u.circuitBreaker.RecordSuccess()
+	return resp, nil
 }
 
 // IsWSConnected returns true if the upstream has an active WebSocket connection
@@ -347,12 +397,12 @@ func (u *Upstream) IsWSConnected() bool {
 
 // StartWS establishes the WebSocket connection for this upstream. Called by Pool at startup.
 // If the client already exists but is disconnected (e.g. initial Connect failed), Connect is retried.
-func (u *Upstream) StartWS(ctx context.Context, messageTimeout time.Duration, reconnectInterval time.Duration) error {
+func (u *Upstream) StartWS(ctx context.Context, messageTimeout time.Duration, reconnectInterval time.Duration, pingInterval time.Duration) error {
 	if u.wsURL == "" {
 		return fmt.Errorf("WebSocket URL not configured")
 	}
 	if u.wsClient == nil {
-		u.wsClient = NewUpstreamWSClient(u.wsURL, messageTimeout, reconnectInterval, u, u.logger)
+		u.wsClient = NewUpstreamWSClient(u.wsURL, messageTimeout, reconnectInterval, pingInterval, u, u.logger)
 	}
 	return u.wsClient.Connect(ctx)
 }
