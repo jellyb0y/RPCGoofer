@@ -29,6 +29,14 @@ For upstreams with WebSocket URLs configured, health is monitored via `newHeads`
 
 The same connection is shared for subscriptions (newHeads, logs, etc.) and RPC calls when `preferWs` is enabled.
 
+### WebSocket Ping/Keepalive
+
+To avoid false timeouts during pauses in block production (e.g. low activity periods), UpstreamWSClient sends periodic ping frames:
+
+- Ping interval configurable via `upstreamPingInterval` (default 20 seconds)
+- Pong handler extends read deadline on each pong
+- Prevents connection from being considered stale when no blocks are produced for 60+ seconds
+
 ### HTTP Polling (Fallback)
 
 For upstreams with only HTTP RPC URLs, health is monitored via periodic `eth_blockNumber` calls.
@@ -304,6 +312,42 @@ Transport: &http.Transport{
     DisableCompression:  true,
 }
 ```
+
+## Circuit Breaker
+
+Upstreams use a circuit breaker to temporarily exclude repeatedly failing nodes:
+
+| State | Description |
+|-------|-------------|
+| Closed | Normal operation; failures increment counter |
+| Open | After threshold failures, requests rejected immediately |
+| Half-Open | After recovery timeout, limited probe requests allowed |
+
+### Configuration
+
+```json
+{
+  "circuitBreakerEnabled": true,
+  "circuitBreakerFailureThreshold": 5,
+  "circuitBreakerRecoveryTimeout": 30000,
+  "circuitBreakerHalfOpenRequests": 2
+}
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| circuitBreakerEnabled | true | Enable circuit breaker for upstreams |
+| circuitBreakerFailureThreshold | 5 | Consecutive failures before opening |
+| circuitBreakerRecoveryTimeout | 30000 ms | Wait before trying half-open |
+| circuitBreakerHalfOpenRequests | 2 | Successful probes to close again |
+
+When circuit is open, the upstream is excluded from GetHealthyMain/GetHealthyFallback. Successful requests reset the breaker; failures transition to open.
+
+## Block Notification Channel
+
+HealthMonitor notifies waiters when the maximum block advances. Used by subscription delivery workers waiting for main upstream to receive a block (before forwarding fallback newHeads). Event-driven signaling reduces polling load on pool locks.
+
+Upstream block numbers for newHeads are updated in the read path (in dispatchMessage before the async handler, and on eventChan drop in readLoop) so lag check always sees up-to-date state and does not falsely mark upstreams unhealthy.
 
 ## Per-Group Monitoring
 

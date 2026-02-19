@@ -517,11 +517,42 @@ func (c *UpstreamWSClient) readLoop() {
 		c.readCountMu.Unlock()
 
 		if c.isSubscriptionMessage(data) {
+			// WIP debug: log newHeads right after read to verify health fix; remove or reduce later
+			var readBase struct {
+				Method string `json:"method"`
+				Params *struct {
+					Result json.RawMessage `json:"result"`
+				} `json:"params"`
+			}
+			if json.Unmarshal(data, &readBase) == nil && readBase.Params != nil && len(readBase.Params.Result) > 0 {
+				var readHeader jsonrpc.BlockHeader
+				if json.Unmarshal(readBase.Params.Result, &readHeader) == nil && readHeader.Number != "" {
+					c.logger.Debug().
+						Str("upstream", c.upstream.Name()).
+						Str("block", readHeader.Number).
+						Msg("newHeads received from upstream")
+				}
+			}
+
 			select {
 			case <-c.ctx.Done():
 				return
 			case c.eventChan <- data:
 			default:
+				// On drop still update block so health does not lag
+				var dropBase struct {
+					Params *struct {
+						Result json.RawMessage `json:"result"`
+					} `json:"params"`
+				}
+				if json.Unmarshal(data, &dropBase) == nil && dropBase.Params != nil {
+					var dropHeader jsonrpc.BlockHeader
+					if json.Unmarshal(dropBase.Params.Result, &dropHeader) == nil && dropHeader.Number != "" {
+						if blockNum, err := parseHexUint64(dropHeader.Number); err == nil {
+							c.upstream.UpdateBlock(blockNum)
+						}
+					}
+				}
 				c.logger.Warn().Str("upstream", c.upstream.Name()).Msg("event queue full, dropping subscription message")
 			}
 		} else {
@@ -589,6 +620,14 @@ func (c *UpstreamWSClient) dispatchMessage(data []byte) {
 				Str("subscription", base.Params.Subscription).
 				Msg("subscription notification, no handler")
 			return
+		}
+
+		// Update block synchronously so checkLagForBlock sees current state before handler goroutine runs
+		var header jsonrpc.BlockHeader
+		if err := json.Unmarshal(base.Params.Result, &header); err == nil && header.Number != "" {
+			if blockNum, err := parseHexUint64(header.Number); err == nil {
+				c.upstream.UpdateBlock(blockNum)
+			}
 		}
 
 		if atomic.CompareAndSwapUint32(&c.firstEventAfterConnect, 0, 1) {
