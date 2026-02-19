@@ -192,15 +192,13 @@ If no message is received from an upstream within `upstreamMessageTimeout` (defa
 |-----------|---------|-------------|
 | `upstreamMessageTimeout` | 60000 ms | Timeout for receiving messages from upstream |
 | `upstreamReconnectInterval` | 5000 ms | Interval between reconnection attempts |
-| `upstreamPingInterval` | 20000 ms | Interval for WebSocket ping frames to upstream; pong extends read deadline |
 
 ### Example Configuration
 
 ```json
 {
   "upstreamMessageTimeout": 60000,
-  "upstreamReconnectInterval": 5000,
-  "upstreamPingInterval": 20000
+  "upstreamReconnectInterval": 5000
 }
 ```
 
@@ -268,19 +266,20 @@ Subscriptions are grouped by type and parameters:
 
 ### Internal Integration
 
-The health monitoring system uses shared subscriptions for `newHeads`. Internal subscribers (HealthMonitor) are processed first, before client subscribers:
+The health monitoring system uses shared subscriptions for `newHeads`:
 
 ```
-broadcastEvent:
-  1. Internal subscribers (DeliverFirst=true) - HealthMonitor, etc.
-  2. Client subscribers - OnEvent enqueues to eventQueue (non-blocking)
+SharedSubscription (newHeads)
+├── HealthMonitor subscriber (updates block numbers, health status)
+├── Client 1 subscriber
+├── Client 2 subscriber
+└── ...
 ```
 
 This means:
-- Health monitor receives the same deduplicated events as clients and is always notified first
+- Health monitor receives the same deduplicated events as clients
 - No duplicate WebSocket connections for internal monitoring
 - Consistent view of blockchain state across all components
-- broadcastEvent never blocks on client-side processing
 
 ## Main/Fallback Synchronization for newHeads
 
@@ -301,13 +300,11 @@ For `newHeads` events from fallback upstreams:
 
 ```
 1. Fallback receives new block
-2. Event enqueued to per-subscriber eventQueue (non-blocking)
-3. deliveryWorker: wait for main to have block (event-driven via blockNotifyChan + ticker fallback)
-4. Forward to client
-5. If all main upstreams become unhealthy: forward immediately (fallback is only source)
+2. Check if any healthy main upstream has this block
+3. If yes: forward event to client immediately
+4. If no: wait for main to receive the block
+5. If all main upstreams become unhealthy: forward event (fallback is only source)
 ```
-
-Async delivery ensures broadcastEvent is never blocked by waitForMainBlock. Event-driven signaling reduces polling on pool locks.
 
 ### Flow Diagram
 

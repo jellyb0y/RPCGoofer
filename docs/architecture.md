@@ -58,10 +58,10 @@ Request proxying logic including:
 
 ### upstream/
 Upstream node management:
-- **Upstream**: Single node connection and execution (HTTP and optional WebSocket); includes Circuit Breaker for failure isolation
-- **UpstreamWSClient**: Owns one WebSocket connection per upstream; multiplexes subscriptions and RPC; sends periodic ping/keepalive to avoid false timeouts
-- **Pool**: Group of upstreams with shared health monitoring; filters by circuit breaker state when selecting upstreams
-- **Health Monitor**: Real-time health checking via WebSocket or polling; notifies block waiters when max block advances
+- **Upstream**: Single node connection and execution (HTTP and optional WebSocket)
+- **UpstreamWSClient**: Owns one WebSocket connection per upstream; multiplexes subscriptions and RPC
+- **Pool**: Group of upstreams with shared health monitoring
+- **Health Monitor**: Real-time health checking via WebSocket or polling
 
 ### balancer/
 Load balancing algorithms:
@@ -82,9 +82,8 @@ Response caching system:
 
 ### subscription/
 WebSocket subscription management:
-- **Manager**: Global shared subscription management
-- **Client Session**: Per-client subscription state; per-subscriber event queue and delivery worker for async fallback newHeads
-- **SharedSubscription**: Internal subscribers (HealthMonitor) processed first; client subscribers receive via non-blocking enqueue
+- **Manager**: Global subscription management
+- **Client Session**: Per-client subscription state
 - **Deduplicator**: Event deduplication across multiple upstreams
 
 ### jsonrpc/
@@ -231,40 +230,11 @@ Note: Subscription methods (`eth_subscribe`, `eth_unsubscribe`) in batch are pro
 - **Network optimization**: Single connection used for entire batch
 - **Error isolation**: Individual request errors don't fail entire batch
 
-## Event Pipeline (Upstream WebSocket)
-
-Subscription events flow through a non-blocking pipeline:
-
-```
-readLoop (per upstream) --> eventChan (buffered) --> dispatchWorker --> dispatchMessage --> broadcastEvent
-                                                                                |
-                                        RPC responses (sync) -------------------+
-```
-
-- **readLoop**: Receives WebSocket messages; eth_subscription events go to eventChan (non-blocking send); RPC responses with ID go to dispatchMessage directly
-- **eventChan**: Buffered channel (cap 1024) decouples read from processing; prevents readLoop from blocking on slow broadcast
-- **dispatchWorker**: Reads from eventChan, calls dispatchMessage. For newHeads, dispatchMessage updates the upstream block synchronously before starting the handler goroutine so lag check sees current state; on eventChan full, readLoop still updates block on drop so health does not lag
-- **broadcastEvent**: Internal subscribers (HealthMonitor) first; then client subscribers via OnEvent (non-blocking enqueue to eventQueue)
-- **deliveryWorker** (per clientSubscriber for fallback newHeads): Reads from eventQueue, waits for main block via blockNotifyChan or ticker, sends to client
-
-## Circuit Breaker
-
-Upstreams use a circuit breaker to isolate repeated failures:
-
-- **Closed**: Normal operation; failures increment counter
-- **Open**: After failure threshold, requests are rejected immediately
-- **Half-Open**: After recovery timeout, limited requests allowed to test
-
-Pool excludes open-circuit upstreams from GetHealthyMain/GetHealthyFallback. Successful calls reset the breaker; failures transition to open.
-
 ## Concurrency Model
 
 - Each upstream pool runs independent health monitoring goroutines
-- Each upstream with WebSocket has one connection; read loop receives messages, enqueues subscription events to eventChan, dispatchWorker processes them and calls broadcastEvent; RPC responses handled synchronously
-- WebSocket ping loop sends keepalive pings periodically to avoid false timeouts during block production pauses
+- Each upstream with WebSocket has one connection; one reader goroutine dispatches RPC responses and subscription events
 - SharedSubscription does not own connections; it subscribes via the upstream's shared connection
-- broadcastEvent: internal subscribers (HealthMonitor) called first synchronously; client subscribers receive via non-blocking enqueue to per-subscriber eventQueue; deliveryWorker for fallback newHeads waits for main block (event-driven via blockNotifyChan, with ticker fallback) then sends to client
-- Pool filters upstreams by circuit breaker state (closed/half-open only) when selecting for requests
 - LRU cache operations are thread-safe with mutex protection
 - Balancer state protected by mutex
 
