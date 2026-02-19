@@ -517,6 +517,18 @@ func (c *UpstreamWSClient) readLoop() {
 		c.readCountMu.Unlock()
 
 		if c.isSubscriptionMessage(data) {
+			// WIP debug, remove after fix
+			if subID := c.parseSubscriptionID(data); subID != "" {
+				c.subMu.Lock()
+				entry, ok := c.subParams[subID]
+				c.subMu.Unlock()
+				if ok && entry.subType == "newHeads" {
+					c.logger.Info().
+						Str("upstream", c.upstream.Name()).
+						Str("subscription", subID).
+						Msg("newHeads: block received from upstream")
+				}
+			}
 			select {
 			case <-c.ctx.Done():
 				return
@@ -541,6 +553,18 @@ func (c *UpstreamWSClient) isSubscriptionMessage(data []byte) bool {
 		return false
 	}
 	return base.Method == "eth_subscription" && base.Params != nil
+}
+
+func (c *UpstreamWSClient) parseSubscriptionID(data []byte) string {
+	var base struct {
+		Params *struct {
+			Subscription string `json:"subscription"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(data, &base); err != nil || base.Params == nil {
+		return ""
+	}
+	return base.Params.Subscription
 }
 
 func (c *UpstreamWSClient) dispatchWorker() {
