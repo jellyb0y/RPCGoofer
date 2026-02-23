@@ -52,6 +52,11 @@ type UpstreamWSClient struct {
 
 	eventChan chan []byte
 
+	onDisconnect   func()
+	onDisconnectMu sync.Mutex
+	onReconnected  func()
+	onReconnectedMu sync.Mutex
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -148,6 +153,40 @@ func (c *UpstreamWSClient) pingLoop() {
 	}
 }
 
+// SetOnDisconnect sets a callback invoked when the connection is lost (start of reconnect) or on Close.
+// Used by the subscription registry to Unregister the upstream.
+func (c *UpstreamWSClient) SetOnDisconnect(f func()) {
+	c.onDisconnectMu.Lock()
+	defer c.onDisconnectMu.Unlock()
+	c.onDisconnect = f
+}
+
+func (c *UpstreamWSClient) fireOnDisconnect() {
+	c.onDisconnectMu.Lock()
+	f := c.onDisconnect
+	c.onDisconnectMu.Unlock()
+	if f != nil {
+		f()
+	}
+}
+
+// SetOnReconnected sets a callback invoked when the connection is re-established after a reconnect.
+// Used by the subscription registry to re-Register the upstream so it gets subscribed to all active subscriptions.
+func (c *UpstreamWSClient) SetOnReconnected(f func()) {
+	c.onReconnectedMu.Lock()
+	defer c.onReconnectedMu.Unlock()
+	c.onReconnected = f
+}
+
+func (c *UpstreamWSClient) fireOnReconnected() {
+	c.onReconnectedMu.Lock()
+	f := c.onReconnected
+	c.onReconnectedMu.Unlock()
+	if f != nil {
+		f()
+	}
+}
+
 // Connected returns true if the WebSocket connection is established
 func (c *UpstreamWSClient) Connected() bool {
 	c.connMu.RLock()
@@ -159,6 +198,7 @@ func (c *UpstreamWSClient) Connected() bool {
 // Close closes the connection and stops the reader
 func (c *UpstreamWSClient) Close() {
 	c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket closing")
+	c.fireOnDisconnect()
 	c.cancel()
 	c.connMu.Lock()
 	if c.conn != nil {
@@ -679,6 +719,7 @@ func (c *UpstreamWSClient) dispatchMessage(data []byte) {
 }
 
 func (c *UpstreamWSClient) reconnect() bool {
+	c.fireOnDisconnect()
 	c.connMu.Lock()
 	if c.conn != nil {
 		c.conn.Close()
@@ -729,47 +770,11 @@ func (c *UpstreamWSClient) reconnect() bool {
 		c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket reconnected successfully")
 
 		c.subMu.Lock()
-		toResubscribe := make([]subParamsEntry, 0, len(c.subParams))
-		for _, entry := range c.subParams {
-			toResubscribe = append(toResubscribe, entry)
-		}
 		c.subHandlers = make(map[string]subscriptionHandler)
 		c.subParams = make(map[string]subParamsEntry)
 		c.subMu.Unlock()
 
-		go func(entries []subParamsEntry) {
-			total := len(entries)
-			var okCount, failCount int
-			for _, entry := range entries {
-				resubCtx, resubCancel := context.WithTimeout(c.ctx, 10*time.Second)
-				subID, err := c.subscribeInternal(resubCtx, entry.subType, entry.params, entry.handler)
-				resubCancel()
-
-				if err != nil {
-					failCount++
-					c.logger.Warn().Err(err).Str("subType", entry.subType).Msg("failed to re-subscribe")
-					continue
-				}
-				okCount++
-				c.logger.Info().
-					Str("upstream", c.upstream.Name()).
-					Str("subType", entry.subType).
-					Str("subID", subID).
-					Msg("re-subscribed")
-
-				c.subMu.Lock()
-				c.subParams[subID] = entry
-				c.subHandlers[subID] = entry.handler
-				c.subMu.Unlock()
-			}
-			c.logger.Info().
-				Str("upstream", c.upstream.Name()).
-				Int("total", total).
-				Int("ok", okCount).
-				Int("failed", failCount).
-				Msg("reconnect resubscribe done")
-		}(toResubscribe)
-
+		c.fireOnReconnected()
 		return true
 	}
 }

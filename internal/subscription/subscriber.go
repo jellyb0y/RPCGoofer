@@ -1,8 +1,16 @@
 package subscription
 
 import (
+	"context"
 	"encoding/json"
 )
+
+// SubscriptionBackend is the backend for shared subscriptions (Registry).
+// Used by ClientSession to Subscribe/Unsubscribe without depending on the concrete type.
+type SubscriptionBackend interface {
+	Subscribe(ctx context.Context, subType SubscriptionType, params json.RawMessage, subscriber Subscriber) error
+	Unsubscribe(subType SubscriptionType, params json.RawMessage, subscriberID string) error
+}
 
 // SubscriptionEvent represents an event from an upstream subscription
 type SubscriptionEvent struct {

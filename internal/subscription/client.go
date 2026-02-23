@@ -30,15 +30,15 @@ type pendingEvent struct {
 
 // ClientSession manages subscriptions for a single WebSocket client
 type ClientSession struct {
-	sendFunc      SendFunc
+	sendFunc     SendFunc
 	subscriptions map[string]*clientSubscriptionInfo // subID -> subscription info
-	mu            sync.RWMutex
-	maxSubs       int
-	logger        zerolog.Logger
-	pool          *upstream.Pool
-	sharedSubMgr  *SharedSubscriptionManager
-	closed        bool
-	closeChan     chan struct{}
+	mu           sync.RWMutex
+	maxSubs      int
+	logger       zerolog.Logger
+	pool         *upstream.Pool
+	backend      SubscriptionBackend
+	closed       bool
+	closeChan    chan struct{}
 }
 
 // clientSubscriptionInfo holds information about a client's subscription
@@ -50,14 +50,14 @@ type clientSubscriptionInfo struct {
 }
 
 // NewClientSession creates a new ClientSession
-func NewClientSession(sendFunc SendFunc, pool *upstream.Pool, sharedSubMgr *SharedSubscriptionManager, maxSubs int, dedupSize int, logger zerolog.Logger) (*ClientSession, error) {
+func NewClientSession(sendFunc SendFunc, pool *upstream.Pool, backend SubscriptionBackend, maxSubs int, dedupSize int, logger zerolog.Logger) (*ClientSession, error) {
 	return &ClientSession{
 		sendFunc:      sendFunc,
 		subscriptions: make(map[string]*clientSubscriptionInfo),
 		maxSubs:       maxSubs,
 		logger:        logger,
 		pool:          pool,
-		sharedSubMgr:  sharedSubMgr,
+		backend:       backend,
 		closeChan:     make(chan struct{}),
 	}, nil
 }
@@ -90,14 +90,11 @@ func (cs *ClientSession) Subscribe(ctx context.Context, subType SubscriptionType
 		closeChan:  make(chan struct{}),
 	}
 
-	// Check if we have SharedSubscriptionManager
-	if cs.sharedSubMgr != nil {
-		// Subscribe through SharedSubscriptionManager
-		if err := cs.sharedSubMgr.Subscribe(ctx, subType, params, subscriber); err != nil {
-			return "", fmt.Errorf("failed to subscribe: %w", err)
-		}
-	} else {
-		return "", fmt.Errorf("no shared subscription manager available")
+	if cs.backend == nil {
+		return "", fmt.Errorf("no subscription backend available")
+	}
+	if err := cs.backend.Subscribe(ctx, subType, params, subscriber); err != nil {
+		return "", fmt.Errorf("failed to subscribe: %w", err)
 	}
 
 	// Store subscription info
@@ -118,7 +115,7 @@ func (cs *ClientSession) Subscribe(ctx context.Context, subType SubscriptionType
 	cs.logger.Debug().
 		Str("subID", subID).
 		Str("type", string(subType)).
-		Msg("subscription created via shared subscription manager")
+		Msg("subscription created")
 
 	return subID, nil
 }
@@ -137,10 +134,9 @@ func (cs *ClientSession) Unsubscribe(subID string) error {
 	// Close the subscriber
 	subInfo.subscriber.Close()
 
-	// Unsubscribe from SharedSubscriptionManager
-	if cs.sharedSubMgr != nil {
-		if err := cs.sharedSubMgr.Unsubscribe(subInfo.subType, subInfo.params, subID); err != nil {
-			cs.logger.Warn().Err(err).Str("subID", subID).Msg("failed to unsubscribe from shared subscription")
+	if cs.backend != nil {
+		if err := cs.backend.Unsubscribe(subInfo.subType, subInfo.params, subID); err != nil {
+			cs.logger.Warn().Err(err).Str("subID", subID).Msg("failed to unsubscribe")
 		}
 	}
 
@@ -165,11 +161,11 @@ func (cs *ClientSession) Close() {
 	cs.subscriptions = make(map[string]*clientSubscriptionInfo)
 	cs.mu.Unlock()
 
-	// Close all subscriptions and unsubscribe from SharedSubscriptionManager
+	// Close all subscriptions and unsubscribe from backend
 	for _, sub := range subs {
 		sub.subscriber.Close()
-		if cs.sharedSubMgr != nil {
-			cs.sharedSubMgr.Unsubscribe(sub.subType, sub.params, sub.subID)
+		if cs.backend != nil {
+			_ = cs.backend.Unsubscribe(sub.subType, sub.params, sub.subID)
 		}
 	}
 

@@ -15,22 +15,22 @@ import (
 
 // Manager manages all subscription sessions
 type Manager struct {
-	sessions      map[uintptr]*ClientSession
-	sharedSubMgrs map[string]*SharedSubscriptionManager // pool name -> shared sub manager
-	mu            sync.RWMutex
-	maxSubs       int
-	dedupSize     int
-	logger        zerolog.Logger
+	sessions   map[uintptr]*ClientSession
+	registries map[string]*Registry // pool name -> subscription registry
+	mu         sync.RWMutex
+	maxSubs    int
+	dedupSize  int
+	logger     zerolog.Logger
 }
 
-// NewManager creates a new subscription Manager
-func NewManager(cfg *config.Config, sharedSubMgrs map[string]*SharedSubscriptionManager, logger zerolog.Logger) *Manager {
+// NewManager creates a new subscription Manager. Registries must be set per group before sessions are created.
+func NewManager(cfg *config.Config, registries map[string]*Registry, logger zerolog.Logger) *Manager {
 	return &Manager{
-		sessions:      make(map[uintptr]*ClientSession),
-		sharedSubMgrs: sharedSubMgrs,
-		maxSubs:       cfg.MaxSubscriptionsPerClient,
-		dedupSize:     cfg.DedupCacheSize,
-		logger:        logger.With().Str("component", "subscription").Logger(),
+		sessions:   make(map[uintptr]*ClientSession),
+		registries: registries,
+		maxSubs:    cfg.MaxSubscriptionsPerClient,
+		dedupSize:  cfg.DedupCacheSize,
+		logger:     logger.With().Str("component", "subscription").Logger(),
 	}
 }
 
@@ -49,10 +49,11 @@ func (m *Manager) GetOrCreateSession(conn *websocket.Conn, sendFunc SendFunc, po
 		return session, nil
 	}
 
-	// Get the SharedSubscriptionManager for this pool
-	sharedSubMgr := m.sharedSubMgrs[groupName]
-
-	session, err := NewClientSession(sendFunc, pool, sharedSubMgr, m.maxSubs, m.dedupSize, m.logger)
+	var backend SubscriptionBackend
+	if m.registries != nil {
+		backend = m.registries[groupName]
+	}
+	session, err := NewClientSession(sendFunc, pool, backend, m.maxSubs, m.dedupSize, m.logger)
 	if err != nil {
 		return nil, err
 	}

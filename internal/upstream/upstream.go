@@ -13,6 +13,7 @@ import (
 
 	"rpcgofer/internal/config"
 	"rpcgofer/internal/jsonrpc"
+	"rpcgofer/internal/subscriptionregistry"
 )
 
 // Upstream represents a single upstream RPC endpoint
@@ -30,7 +31,8 @@ type Upstream struct {
 	circuitBreaker *CircuitBreaker
 	logger         zerolog.Logger
 
-	wsClient *UpstreamWSClient
+	wsClient            *UpstreamWSClient
+	subscriptionRegistry subscriptionregistry.Registry
 }
 
 // Config for creating a new Upstream
@@ -395,6 +397,11 @@ func (u *Upstream) IsWSConnected() bool {
 	return u.wsClient.Connected()
 }
 
+// WsClient returns the WebSocket client for this upstream, or nil if not configured/created.
+func (u *Upstream) WsClient() *UpstreamWSClient {
+	return u.wsClient
+}
+
 // StartWS establishes the WebSocket connection for this upstream. Called by Pool at startup.
 // If the client already exists but is disconnected (e.g. initial Connect failed), Connect is retried.
 func (u *Upstream) StartWS(ctx context.Context, messageTimeout time.Duration, reconnectInterval time.Duration, pingInterval time.Duration) error {
@@ -420,6 +427,32 @@ func (u *Upstream) UnsubscribeWS(subID string) {
 	if u.wsClient != nil {
 		u.wsClient.Unsubscribe(subID)
 	}
+}
+
+// SetSubscriptionRegistry sets the subscription registry used for Register/Unregister and event delivery.
+// Called when the upstream connects so it can implement SubscriptionTarget.
+func (u *Upstream) SetSubscriptionRegistry(r subscriptionregistry.Registry) {
+	u.subscriptionRegistry = r
+}
+
+// Subscribe implements subscriptionregistry.SubscriptionTarget. Called by the registry to subscribe this upstream to a (subType, params).
+func (u *Upstream) Subscribe(ctx context.Context, subType subscriptionregistry.SubscriptionType, params json.RawMessage) (string, error) {
+	if u.wsClient == nil {
+		return "", fmt.Errorf("WebSocket not connected")
+	}
+	reg := u.subscriptionRegistry
+	name := u.name
+	handler := func(result json.RawMessage) {
+		if reg != nil {
+			reg.DeliverEvent(name, subType, params, result)
+		}
+	}
+	return u.wsClient.Subscribe(ctx, string(subType), params, handler)
+}
+
+// Unsubscribe implements subscriptionregistry.SubscriptionTarget.
+func (u *Upstream) Unsubscribe(subID string) {
+	u.UnsubscribeWS(subID)
 }
 
 // Close closes all connections

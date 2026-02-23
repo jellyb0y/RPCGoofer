@@ -26,9 +26,9 @@ type Server struct {
 	cache            cache.Cache
 	pluginManager    *plugin.PluginManager
 	batchAggregator  *batcher.Aggregator
-	subManager       *subscription.Manager
-	sharedSubMgrs    map[string]*subscription.SharedSubscriptionManager // pool name -> shared sub manager
-	rpcServer        *http.Server
+	subManager *subscription.Manager
+	registries map[string]*subscription.Registry // pool name -> subscription registry
+	rpcServer  *http.Server
 	wsServer         *http.Server
 	logger           zerolog.Logger
 }
@@ -104,10 +104,8 @@ func New(cfg *config.Config, logger zerolog.Logger) (*Server, error) {
 		logger.Info().Msg("batching disabled")
 	}
 
-	sharedSubMgrs := make(map[string]*subscription.SharedSubscriptionManager)
-
-	// Create subscription manager (will receive shared sub managers later)
-	subManager := subscription.NewManager(cfg, sharedSubMgrs, logger)
+	registries := make(map[string]*subscription.Registry)
+	subManager := subscription.NewManager(cfg, registries, logger)
 
 	return &Server{
 		cfg:             cfg,
@@ -116,7 +114,7 @@ func New(cfg *config.Config, logger zerolog.Logger) (*Server, error) {
 		pluginManager:   pluginMgr,
 		batchAggregator: batchAgg,
 		subManager:      subManager,
-		sharedSubMgrs:   sharedSubMgrs,
+		registries:      registries,
 		logger:          logger,
 	}, nil
 }
@@ -126,21 +124,18 @@ func (s *Server) AddGroup(groupCfg config.GroupConfig) {
 	pool := upstream.NewPool(groupCfg, s.cfg, s.logger)
 	pool.SetSelector(balancer.NewWeightedRoundRobin(pool))
 
-	// Create SharedSubscriptionManager for this pool
-	sharedSubMgr := subscription.NewSharedSubscriptionManager(
-		pool,
-		s.cfg.DedupCacheSize,
-		s.cfg.GetUpstreamMessageTimeoutDuration(),
-		s.cfg.GetUpstreamReconnectIntervalDuration(),
-		s.logger,
-	)
-	s.sharedSubMgrs[groupCfg.Name] = sharedSubMgr
+	subRegistry := subscription.NewRegistry(s.cfg.DedupCacheSize, s.logger)
+	s.registries[groupCfg.Name] = subRegistry
 
-	// Set up NewHeadsProvider for health monitoring
-	newHeadsProvider := subscription.NewNewHeadsProviderAdapter(sharedSubMgr)
+	newHeadsProvider := subscription.NewRegistryNewHeadsProviderAdapter(subRegistry)
 	pool.SetNewHeadsProvider(newHeadsProvider)
 	pool.SetOnUpstreamWSConnected(func(u *upstream.Upstream) {
-		sharedSubMgr.AddUpstreamToExistingSubscriptions(u)
+		u.SetSubscriptionRegistry(subRegistry)
+		if u.WsClient() != nil {
+			u.WsClient().SetOnDisconnect(func() { subRegistry.Unregister(u.Name()) })
+			u.WsClient().SetOnReconnected(func() { subRegistry.Register(u.Name(), u) })
+		}
+		subRegistry.Register(u.Name(), u)
 	})
 
 	if s.batchAggregator != nil {
@@ -241,10 +236,9 @@ func (s *Server) Stop(ctx context.Context) error {
 	// Stop all pools (this will unsubscribe health monitors from shared subscriptions)
 	s.router.StopAll()
 
-	// Close all shared subscription managers
-	for name, mgr := range s.sharedSubMgrs {
-		mgr.Close()
-		s.logger.Debug().Str("group", name).Msg("closed shared subscription manager")
+	for name, reg := range s.registries {
+		reg.Close()
+		s.logger.Debug().Str("group", name).Msg("closed subscription registry")
 	}
 
 	// Close batch aggregator
