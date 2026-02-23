@@ -17,14 +17,15 @@ For upstreams with WebSocket URLs configured, health is monitored via `newHeads`
 **Flow:**
 ```
 1. Pool starts: establish one WebSocket connection per upstream with wsUrl
-2. Health monitor subscribes to newHeads on each connection
-3. For each new block header:
+2. On connect: upstream registers with subscription Registry; Registry subscribes it to newHeads (and other active subscriptions)
+3. Health monitor is a subscriber of the newHeads subscription in the Registry
+4. For each new block header (delivered via Registry):
    - Extract block number
    - Update upstream's current block
    - Recalculate health status
-4. On connection failure:
-   - Mark upstream unhealthy
-   - UpstreamWSClient reconnects and re-subscribes automatically
+5. On connection failure:
+   - Upstream calls Registry.Unregister; Mark upstream unhealthy
+   - UpstreamWSClient reconnects; on success calls Registry.Register and Registry re-subscribes it to all active subscriptions
 ```
 
 The same connection is shared for subscriptions (newHeads, logs, etc.) and RPC calls when `preferWs` is enabled.
@@ -284,11 +285,12 @@ The UpstreamWSClient owns the WebSocket connection and handles reconnection:
 
 ```
 1. Connection lost detected (read error or message timeout)
-2. Mark upstream unhealthy
+2. Upstream calls Registry.Unregister(name); mark upstream unhealthy
 3. Wait reconnectInterval (default: 5 seconds)
 4. Attempt reconnection
 5. On success:
-   - Re-subscribe to all active subscriptions (newHeads, logs, etc.)
+   - Upstream calls Registry.Register(name, target)
+   - Registry subscribes upstream to all active subscriptions (newHeads, logs, etc.)
    - Resume event delivery and RPC
 6. On failure:
    - Repeat from step 3

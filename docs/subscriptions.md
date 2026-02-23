@@ -150,13 +150,12 @@ RPCGofer subscribes to multiple upstreams simultaneously for increased reliabili
 1. Client subscribes to newHeads
 2. RPCGofer:
    a. Generates client subscription ID
-   b. Subscribes client to SharedSubscription (creates one if needed)
-   c. SharedSubscription maintains connections to all upstreams
+   b. Adds client as subscriber to the subscription Registry (creates subscription if needed)
+   c. Registry holds active subscriptions; upstreams register with Registry on connect/reconnect
    d. Returns client subscription ID
 3. Events from any upstream:
-   a. Received by SharedSubscription
-   b. Checked for duplicates (before fan-out)
-   c. If unique: broadcast to all subscribers (clients + health monitor)
+   a. Upstream delivers event to Registry (DeliverEvent)
+   b. Registry checks deduplication, then broadcasts to all subscribers (clients + health monitor)
 ```
 
 ### Benefits
@@ -173,10 +172,11 @@ RPCGofer automatically reconnects to upstream WebSocket connections when they dr
 
 ```
 1. Upstream WebSocket connection drops or times out
-2. RPCGofer waits for reconnectInterval (default: 5 seconds)
-3. Attempts to reconnect and resubscribe
-4. If successful: resumes receiving events
-5. If failed: waits and retries indefinitely
+2. Upstream notifies Registry (Unregister) so Registry clears all subscriptions for that upstream
+3. RPCGofer waits for reconnectInterval (default: 5 seconds)
+4. Attempts to reconnect; on success upstream registers again with Registry (Register)
+5. Registry subscribes the upstream to all active subscriptions; events resume
+6. If reconnect fails: waits and retries indefinitely
 ```
 
 ### Message Timeout Detection
@@ -212,9 +212,9 @@ WRN upstream read error, will attempt reconnection upstream=infura error="..."
 INF successfully reconnected to upstream upstream=infura
 ```
 
-## Shared Subscriptions (Connection Multiplexing)
+## Subscription Registry (Connection Multiplexing)
 
-RPCGofer uses shared subscriptions to optimize WebSocket connections to upstreams. Each upstream with wsUrl has exactly one WebSocket connection, owned by the upstream and shared for subscriptions and RPC.
+RPCGofer uses a single **subscription Registry** per group to manage subscriptions. Each upstream with wsUrl has exactly one WebSocket connection; on connect or reconnect the upstream registers with the Registry and the Registry subscribes it to all active subscriptions.
 
 ### Architecture
 
@@ -227,14 +227,17 @@ Connection model (1 connection per upstream):
   Upstream 1 (wsUrl) --> UpstreamWSClient --> 1 WebSocket connection
   Upstream 2 (wsUrl) --> UpstreamWSClient --> 1 WebSocket connection
 
+  On connect/reconnect: upstream calls Registry.Register(name, target)
+  Registry subscribes the upstream to all active (subType, params); events delivered via DeliverEvent
+
+  Client 1 ──┐
+  Client 2 ──┼──> Registry (active subscriptions) <── Register/Unregister ── Upstream 1, 2, ...
+  Client 3 ──┘     newHeads, logs, etc.                  + DeliverEvent from upstreams
+
   Same connection used for:
   - newHeads subscription (health monitor + clients)
   - logs, newPendingTransactions, etc.
   - RPC calls when preferWs is true
-
-  Client 1 ──┐
-  Client 2 ──┼──> SharedSubscription ───┬──> Upstream 1 (SubscribeWS on shared conn)
-  Client 3 ──┘       (newHeads)         └──> Upstream 2 (SubscribeWS on shared conn)
 
   Total: 1 connection per upstream (not per subscription type or client)
 ```
@@ -242,9 +245,10 @@ Connection model (1 connection per upstream):
 ### How It Works
 
 1. **Pool** - at startup, establishes one WebSocket connection per upstream with wsUrl (UpstreamWSClient)
-2. **SharedSubscriptionManager** - central manager for all shared subscriptions per group
-3. **SharedSubscription** - one shared subscription per unique `(type, params)` combination; subscribes via upstream.SubscribeWS on the existing connection
-4. **Subscribers** - both clients and internal components (like health monitor) subscribe to shared subscriptions
+2. **Registry** - single source of truth per group: active subscriptions (by type+params), subscribers (clients + health monitor), and registered upstreams (each provides Subscribe/Unsubscribe via SubscriptionTarget)
+3. On **connect/reconnect** the upstream calls `Registry.Register(name, target)`; the Registry immediately subscribes that upstream to all active subscriptions
+4. On **disconnect** the upstream calls `Registry.Unregister(name)` so the Registry clears all subscription state for that upstream
+5. **Subscribers** (clients, health monitor) subscribe through the Registry; events are delivered via `DeliverEvent` from upstreams
 
 ### Subscription Key
 
@@ -266,10 +270,10 @@ Subscriptions are grouped by type and parameters:
 
 ### Internal Integration
 
-The health monitoring system uses shared subscriptions for `newHeads`:
+The health monitoring system subscribes to `newHeads` through the same Registry:
 
 ```
-SharedSubscription (newHeads)
+Registry subscription "newHeads:"
 ├── HealthMonitor subscriber (updates block numbers, health status)
 ├── Client 1 subscriber
 ├── Client 2 subscriber
@@ -280,6 +284,7 @@ This means:
 - Health monitor receives the same deduplicated events as clients
 - No duplicate WebSocket connections for internal monitoring
 - Consistent view of blockchain state across all components
+- After upstream reconnect, Registry re-subscribes the upstream so newHeads (and other subscriptions) resume without manual resubscribe
 
 ## Main/Fallback Synchronization for newHeads
 
@@ -369,14 +374,14 @@ Since events are received from multiple upstreams, deduplication prevents duplic
 ### Deduplication Flow
 
 ```
-1. Event received from upstream by SharedSubscription
-2. Generate deduplication key
+1. Upstream delivers event to Registry (DeliverEvent)
+2. Registry generates deduplication key for the subscription
 3. Check LRU cache:
    - If key exists: discard event (duplicate)
    - If key absent: add to cache, broadcast to all subscribers
 ```
 
-Deduplication happens at the SharedSubscription level, before events are fanned out to subscribers. This ensures:
+Deduplication happens in the Registry per subscription key, before events are fanned out to subscribers. This ensures:
 - Each unique event is processed only once
 - All subscribers receive the same deduplicated stream
 - Efficient use of memory (single cache per subscription type)
@@ -420,28 +425,29 @@ Each WebSocket connection has an associated client session that tracks:
 1. WebSocket connection established
 2. Session created on first subscription
 3. For each subscription:
-   a. Client added as subscriber to SharedSubscription
-   b. SharedSubscription created if not exists
+   a. Client added as subscriber in Registry (subscription created if not exists)
+   b. If new subscription: Registry subscribes all registered upstreams to it
 4. On disconnect:
-   a. Client removed from all SharedSubscriptions
-   b. Empty SharedSubscriptions cleaned up (connections closed)
+   a. Client removed from Registry subscriptions
+   b. Subscriptions with no subscribers are removed; Registry calls Unsubscribe on upstreams for that type
    c. Session removed
 ```
 
-### Shared Subscription Lifecycle
+### Registry and Upstream Lifecycle
 
 ```
 1. First subscriber requests subscription type
-2. SharedSubscription created:
-   a. For each upstream with WebSocket: calls upstream.SubscribeWS (uses existing connection)
-   b. Registers event handlers; events delivered by upstream's reader goroutine
-3. Additional subscribers join existing SharedSubscription
-4. When last subscriber leaves:
-   a. Unsubscribe from all upstreams (eth_unsubscribe on shared connection)
-   b. Remove SharedSubscription (connections remain open for other uses)
+2. Registry creates subscription (key = type+params), adds subscriber
+3. For each registered upstream: Registry calls target.Subscribe(subType, params), stores subID
+4. Additional subscribers join the same subscription in the Registry
+5. When last subscriber leaves:
+   a. Registry calls Unsubscribe(subID) on each upstream for that subscription
+   b. Subscription removed from Registry
+6. When upstream connects/reconnects: it calls Registry.Register(name, target); Registry subscribes it to all active subscriptions
+7. When upstream disconnects: it calls Registry.Unregister(name); Registry clears all state for that upstream
 ```
 
-WebSocket connections are owned by the upstream and persist for the pool's lifetime. They are not closed when a SharedSubscription is removed.
+WebSocket connections are owned by the upstream and persist for the pool's lifetime. They are not closed when a subscription is removed from the Registry.
 
 ## Error Handling
 
@@ -460,11 +466,11 @@ WebSocket connections are owned by the upstream and persist for the pool's lifet
 
 ### Upstream Disconnection
 
-When an upstream disconnects during subscription:
-1. Log warning
-2. Remove upstream from subscription
-3. Continue with remaining upstreams
-4. If all upstreams lost: subscription continues but receives no events
+When an upstream disconnects:
+1. Upstream calls Registry.Unregister(name) (on reconnect start or Close)
+2. Registry removes all subscription state for that upstream
+3. Remaining upstreams continue delivering events
+4. When the upstream reconnects, it calls Registry.Register(name, target) and the Registry subscribes it again to all active subscriptions
 
 ### Invalid Subscription Type
 

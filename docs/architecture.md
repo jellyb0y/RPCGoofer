@@ -82,9 +82,10 @@ Response caching system:
 
 ### subscription/
 WebSocket subscription management:
-- **Manager**: Global subscription management
-- **Client Session**: Per-client subscription state
-- **Deduplicator**: Event deduplication across multiple upstreams
+- **Registry**: Single source of truth per group; active subscriptions, subscribers (clients + health monitor), registered upstreams; drives Subscribe/Unsubscribe on upstreams and delivers events
+- **Manager**: Global subscription sessions; creates client sessions that use Registry as backend
+- **Client Session**: Per-client subscription state; subscribes via Registry
+- **Deduplicator**: Event deduplication per subscription in the Registry
 
 ### jsonrpc/
 JSON-RPC protocol implementation:
@@ -234,7 +235,7 @@ Note: Subscription methods (`eth_subscribe`, `eth_unsubscribe`) in batch are pro
 
 - Each upstream pool runs independent health monitoring goroutines
 - Each upstream with WebSocket has one connection; one reader goroutine dispatches RPC responses and subscription events
-- SharedSubscription does not own connections; it subscribes via the upstream's shared connection
+- Upstreams register with the subscription Registry on connect/reconnect; the Registry subscribes them to all active subscriptions and receives events via DeliverEvent
 - LRU cache operations are thread-safe with mutex protection
 - Balancer state protected by mutex
 
