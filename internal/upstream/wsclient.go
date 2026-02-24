@@ -310,6 +310,8 @@ func (c *UpstreamWSClient) Subscribe(ctx context.Context, subType string, params
 	c.pendingMu.Lock()
 	c.pending[reqID] = respChan
 	c.pendingMu.Unlock()
+	// TODO: remove after debug
+	c.logger.Info().Str("upstream", c.upstream.Name()).Int64("reqID", reqID).Str("subType", subType).Msg("Subscribe: added to pending, sending request")
 
 	req, err := jsonrpc.NewRequest("eth_subscribe", subParams, jsonrpc.NewIDInt(reqID))
 	if err != nil {
@@ -347,6 +349,8 @@ func (c *UpstreamWSClient) Subscribe(ctx context.Context, subType string, params
 		c.pendingMu.Unlock()
 		return "", fmt.Errorf("failed to send subscribe request: %w", writeErr)
 	}
+	// TODO: remove after debug
+	c.logger.Info().Str("upstream", c.upstream.Name()).Int64("reqID", reqID).Msg("Subscribe: request sent, waiting for response")
 
 	var upstreamSubID string
 	select {
@@ -360,7 +364,11 @@ func (c *UpstreamWSClient) Subscribe(ctx context.Context, subType string, params
 		if err := json.Unmarshal(resp.Result, &upstreamSubID); err != nil {
 			return "", fmt.Errorf("failed to parse subscription ID: %w", err)
 		}
+		// TODO: remove after debug
+		c.logger.Info().Str("upstream", c.upstream.Name()).Int64("reqID", reqID).Str("upstreamSubID", upstreamSubID).Msg("Subscribe: response received, registering handler")
 	case <-ctx.Done():
+		// TODO: remove after debug
+		c.logger.Info().Str("upstream", c.upstream.Name()).Int64("reqID", reqID).Msg("Subscribe: context done (timeout/cancel), removing from pending")
 		c.pendingMu.Lock()
 		delete(c.pending, reqID)
 		c.pendingMu.Unlock()
@@ -577,6 +585,8 @@ func (c *UpstreamWSClient) readLoop() {
 				c.logger.Warn().Str("upstream", c.upstream.Name()).Msg("event queue full, dropping subscription message")
 			}
 		} else {
+			// TODO: remove after debug
+			c.logger.Info().Str("upstream", c.upstream.Name()).Int("dataLen", len(data)).Msg("readLoop: non-subscription message, dispatching (may be response)")
 			c.dispatchMessage(data)
 		}
 	}
@@ -694,6 +704,8 @@ func (c *UpstreamWSClient) dispatchMessage(data []byte) {
 		case int64:
 			reqID = v
 		default:
+			// TODO: remove after debug
+			c.logger.Info().Str("upstream", c.upstream.Name()).Interface("idVal", idVal).Msg("dispatchMessage: response id type not float64/int64, skipping")
 			return
 		}
 
@@ -708,12 +720,21 @@ func (c *UpstreamWSClient) dispatchMessage(data []byte) {
 			delete(c.pending, reqID)
 		}
 		c.pendingMu.Unlock()
+		// TODO: remove after debug
+		c.logger.Info().Str("upstream", c.upstream.Name()).Int64("reqID", reqID).Bool("pendingExists", exists).Msg("dispatchMessage: response with id, lookup pending")
 
 		if exists && ch != nil {
 			select {
 			case ch <- &resp:
+				// TODO: remove after debug
+				c.logger.Info().Str("upstream", c.upstream.Name()).Int64("reqID", reqID).Msg("dispatchMessage: response delivered to channel")
 			default:
+				// TODO: remove after debug
+				c.logger.Info().Str("upstream", c.upstream.Name()).Int64("reqID", reqID).Msg("dispatchMessage: response NOT delivered (channel full/default), dropped")
 			}
+		} else if !exists {
+			// TODO: remove after debug
+			c.logger.Info().Str("upstream", c.upstream.Name()).Int64("reqID", reqID).Msg("dispatchMessage: response dropped, no pending entry for reqID")
 		}
 	}
 }
@@ -774,7 +795,9 @@ func (c *UpstreamWSClient) reconnect() bool {
 		c.subParams = make(map[string]subParamsEntry)
 		c.subMu.Unlock()
 
-		c.fireOnReconnected()
+		// TODO: remove after debug
+		c.logger.Info().Str("upstream", c.upstream.Name()).Msg("reconnect: about to fireOnReconnected in goroutine, readLoop will continue to ReadMessage")
+		go c.fireOnReconnected()
 		return true
 	}
 }
