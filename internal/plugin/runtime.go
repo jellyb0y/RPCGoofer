@@ -293,6 +293,16 @@ func (r *Runtime) setupUtils() {
 	r.vm.Set("utils", utils)
 }
 
+// SetConfig injects a config object into the JS runtime.
+// If cfg is nil, an empty object is injected (not undefined),
+// so that accessing config.someKey returns undefined instead of TypeError.
+func (r *Runtime) SetConfig(cfg map[string]interface{}) {
+	if cfg == nil {
+		cfg = make(map[string]interface{})
+	}
+	r.vm.Set("config", cfg)
+}
+
 // SetupUpstreamCaller creates upstream object with call methods
 func (r *Runtime) SetupUpstreamCaller(caller UpstreamCaller) {
 	upstream := r.vm.NewObject()

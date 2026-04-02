@@ -72,8 +72,9 @@ type BatchMethodConfig struct {
 
 // GroupConfig represents a group of upstreams
 type GroupConfig struct {
-	Name      string           `json:"name"`
-	Upstreams []UpstreamConfig `json:"upstreams"`
+	Name         string                 `json:"name"`
+	Upstreams    []UpstreamConfig       `json:"upstreams"`
+	PluginParams map[string]interface{} `json:"pluginParams,omitempty"`
 }
 
 // UpstreamConfig represents a single upstream configuration

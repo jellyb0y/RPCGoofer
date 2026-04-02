@@ -22,7 +22,9 @@ type Manager interface {
 	// HasPlugin checks if a plugin exists for the given method
 	HasPlugin(method string) bool
 	// Execute runs the plugin for the given method
-	Execute(ctx context.Context, method string, id jsonrpc.ID, params json.RawMessage, caller UpstreamCaller) *jsonrpc.Response
+	Execute(ctx context.Context, groupName string, method string, id jsonrpc.ID, params json.RawMessage, caller UpstreamCaller) *jsonrpc.Response
+	// SetGroupConfig registers plugin configuration for a specific group
+	SetGroupConfig(groupName string, cfg map[string]interface{})
 	// GetMethods returns all registered plugin methods
 	GetMethods() []string
 	// Close releases all resources

@@ -124,7 +124,8 @@ func (s *Server) AddGroup(groupCfg config.GroupConfig) {
 	pool := upstream.NewPool(groupCfg, s.cfg, s.logger)
 	pool.SetSelector(balancer.NewWeightedRoundRobin(pool))
 
-	subRegistry := subscription.NewRegistry(s.cfg.DedupCacheSize, s.logger)
+	// TODO: remove after debug - pass group so registry logs show under same filter as wsclient
+	subRegistry := subscription.NewRegistry(s.cfg.DedupCacheSize, s.logger.With().Str("group", groupCfg.Name).Logger())
 	s.registries[groupCfg.Name] = subRegistry
 
 	newHeadsProvider := subscription.NewRegistryNewHeadsProviderAdapter(subRegistry)
@@ -140,6 +141,11 @@ func (s *Server) AddGroup(groupCfg config.GroupConfig) {
 
 	if s.batchAggregator != nil {
 		pool.SetBatchStats(s.batchAggregator)
+	}
+
+	// Register plugin config for this group
+	if s.pluginManager != nil && groupCfg.PluginParams != nil {
+		s.pluginManager.SetGroupConfig(groupCfg.Name, groupCfg.PluginParams)
 	}
 
 	s.router.AddPool(pool)

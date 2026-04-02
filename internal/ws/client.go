@@ -192,7 +192,7 @@ func (c *Client) handleSingle(ctx context.Context, req *jsonrpc.Request) {
 		c.logger.Debug().
 			Str("method", req.Method).
 			Msg("executing plugin (ws)")
-		resp := c.pluginManager.Execute(ctx, req.Method, req.ID, req.Params, caller)
+		resp := c.pluginManager.Execute(ctx, c.groupName, req.Method, req.ID, req.Params, caller)
 		c.sendResponse(resp)
 		return
 	}
@@ -289,7 +289,7 @@ func (c *Client) handleBatch(ctx context.Context, requests []*jsonrpc.Request) {
 				c.logger.Debug().
 					Str("method", req.Method).
 					Msg("executing plugin (ws batch)")
-				responses[i] = c.pluginManager.Execute(ctx, req.Method, req.ID, req.Params, caller)
+				responses[i] = c.pluginManager.Execute(ctx, c.groupName, req.Method, req.ID, req.Params, caller)
 				continue
 			}
 

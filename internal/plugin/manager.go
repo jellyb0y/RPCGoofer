@@ -25,18 +25,20 @@ var methodDirectiveRegex = regexp.MustCompile(`(?m)^//\s*@method\s+(\S+)`)
 
 // PluginManager manages JavaScript plugins
 type PluginManager struct {
-	plugins map[string]*Plugin // method -> plugin
-	logger  zerolog.Logger
-	timeout time.Duration
-	mu      sync.RWMutex
+	plugins      map[string]*Plugin              // method -> plugin
+	groupConfigs map[string]map[string]interface{} // groupName -> config for JS runtime
+	logger       zerolog.Logger
+	timeout      time.Duration
+	mu           sync.RWMutex
 }
 
 // NewPluginManager creates a new PluginManager
 func NewPluginManager(logger zerolog.Logger) *PluginManager {
 	return &PluginManager{
-		plugins: make(map[string]*Plugin),
-		logger:  logger.With().Str("component", "plugin-manager").Logger(),
-		timeout: DefaultExecutionTimeout,
+		plugins:      make(map[string]*Plugin),
+		groupConfigs: make(map[string]map[string]interface{}),
+		logger:       logger.With().Str("component", "plugin-manager").Logger(),
+		timeout:      DefaultExecutionTimeout,
 	}
 }
 
@@ -142,6 +144,14 @@ func extractMethodDirective(script string) string {
 	return ""
 }
 
+// SetGroupConfig registers plugin configuration for a specific group.
+// The config map is injected as the "config" object in JS runtime.
+func (m *PluginManager) SetGroupConfig(groupName string, cfg map[string]interface{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.groupConfigs[groupName] = cfg
+}
+
 // HasPlugin checks if a plugin exists for the given method
 func (m *PluginManager) HasPlugin(method string) bool {
 	m.mu.RLock()
@@ -151,9 +161,10 @@ func (m *PluginManager) HasPlugin(method string) bool {
 }
 
 // Execute runs the plugin for the given method
-func (m *PluginManager) Execute(ctx context.Context, method string, id jsonrpc.ID, params json.RawMessage, caller UpstreamCaller) *jsonrpc.Response {
+func (m *PluginManager) Execute(ctx context.Context, groupName string, method string, id jsonrpc.ID, params json.RawMessage, caller UpstreamCaller) *jsonrpc.Response {
 	m.mu.RLock()
 	plugin, exists := m.plugins[method]
+	groupCfg := m.groupConfigs[groupName]
 	m.mu.RUnlock()
 
 	if !exists {
@@ -167,7 +178,7 @@ func (m *PluginManager) Execute(ctx context.Context, method string, id jsonrpc.I
 	// Execute plugin in goroutine to handle timeout
 	resultCh := make(chan *jsonrpc.Response, 1)
 	go func() {
-		resultCh <- m.executePlugin(plugin, id, params, caller)
+		resultCh <- m.executePlugin(plugin, groupCfg, id, params, caller)
 	}()
 
 	select {
@@ -186,9 +197,12 @@ func (m *PluginManager) Execute(ctx context.Context, method string, id jsonrpc.I
 }
 
 // executePlugin runs the plugin with the given parameters
-func (m *PluginManager) executePlugin(plugin *Plugin, id jsonrpc.ID, params json.RawMessage, caller UpstreamCaller) *jsonrpc.Response {
+func (m *PluginManager) executePlugin(plugin *Plugin, groupCfg map[string]interface{}, id jsonrpc.ID, params json.RawMessage, caller UpstreamCaller) *jsonrpc.Response {
 	// Create new runtime for this execution (thread safety)
 	runtime := NewRuntime(m.logger)
+
+	// Inject group-specific config into JS runtime (before RunScript so top-level code can access it)
+	runtime.SetConfig(groupCfg)
 
 	// Set up upstream caller
 	runtime.SetupUpstreamCaller(caller)

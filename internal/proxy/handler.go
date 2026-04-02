@@ -128,7 +128,7 @@ func (h *Handler) executeWithCache(ctx context.Context, pool *upstream.Pool, gro
 		h.logger.Debug().
 			Str("method", req.Method).
 			Msg("executing plugin")
-		return h.pluginManager.Execute(ctx, req.Method, req.ID, req.Params, caller)
+		return h.pluginManager.Execute(ctx, groupName, req.Method, req.ID, req.Params, caller)
 	}
 
 	// Check cache first
@@ -194,7 +194,7 @@ func (h *Handler) executeBatchWithCache(ctx context.Context, pool *upstream.Pool
 			h.logger.Debug().
 				Str("method", req.Method).
 				Msg("executing plugin (batch)")
-			responses[i] = h.pluginManager.Execute(ctx, req.Method, req.ID, req.Params, caller)
+			responses[i] = h.pluginManager.Execute(ctx, groupName, req.Method, req.ID, req.Params, caller)
 			continue
 		}
 
@@ -316,7 +316,7 @@ func (e *HandlerExecutor) ExecuteBatch(ctx context.Context, groupName string, re
 	// Check if this method is handled by a plugin
 	if e.handler.pluginManager != nil && e.handler.pluginManager.HasPlugin(req.Method) {
 		caller := plugin.NewPoolCaller(ctx, pool, plugin.RetryConfig{Enabled: e.handler.retryConfig.Enabled, MaxAttempts: e.handler.retryConfig.MaxAttempts}, e.handler.logger)
-		return e.handler.pluginManager.Execute(ctx, req.Method, req.ID, req.Params, caller)
+		return e.handler.pluginManager.Execute(ctx, groupName, req.Method, req.ID, req.Params, caller)
 	}
 
 	// Execute directly on upstream (no batching, no caching)
