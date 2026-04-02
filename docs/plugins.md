@@ -113,6 +113,8 @@ Each plugin is a `.js` file with two required elements:
 // @method custom_methodName
 function execute(params, upstream) {
     // Your logic here
+    // Access group-specific config via the global `config` object
+    // var addr = config.someContractAddress;
     return result;
 }
 ```
@@ -185,7 +187,70 @@ curl -X POST http://localhost:8545/ethereum \
 # Response: {"jsonrpc":"2.0","result":[true, false],"id":1}
 ```
 
+## Group-Specific Plugin Parameters
+
+Plugins can receive group-specific configuration via the `config` object. This allows the same plugin to behave differently depending on which network group handles the request (e.g., use different contract addresses per chain).
+
+### Configuration
+
+Add `pluginParams` to each group in your `config.json`:
+
+```json
+{
+  "groups": [
+    {
+      "name": "ethereum",
+      "pluginParams": {
+        "codeCheckerAddress": "0x1111111111111111111111111111111111111111",
+        "maxBatchSize": 50
+      },
+      "upstreams": [...]
+    },
+    {
+      "name": "polygon",
+      "pluginParams": {
+        "codeCheckerAddress": "0x2222222222222222222222222222222222222222",
+        "maxBatchSize": 100
+      },
+      "upstreams": [...]
+    }
+  ]
+}
+```
+
+### Accessing Config in Plugins
+
+The `pluginParams` object is injected into the JS runtime as `config`. Access values directly:
+
+```javascript
+// @method custom_checkCode
+function execute(params, upstream) {
+    var contractAddr = config.codeCheckerAddress;
+    if (!contractAddr) {
+        throw new Error("codeCheckerAddress not configured for this group");
+    }
+
+    var result = upstream.call("eth_call", [{
+        to: contractAddr,
+        data: "0x..."
+    }, "latest"]);
+
+    return result;
+}
+```
+
+If `pluginParams` is not set for a group, `config` will be an empty object (`{}`), so accessing `config.someKey` safely returns `undefined` rather than throwing.
+
 ## Available APIs
+
+### config Object
+
+The `config` object contains group-specific parameters defined in `pluginParams` configuration. Each key-value pair from `pluginParams` is available as a property on `config`.
+
+```javascript
+var addr = config.codeCheckerAddress;  // string or undefined
+var size = config.maxBatchSize;        // number or undefined
+```
 
 ### upstream Object
 

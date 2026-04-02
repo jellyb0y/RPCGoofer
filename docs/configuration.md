@@ -47,6 +47,9 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
   "groups": [
     {
       "name": "ethereum",
+      "pluginParams": {
+        "codeCheckerAddress": "0x1234..."
+      },
       "upstreams": [
         {
           "name": "infura",
@@ -149,6 +152,7 @@ Groups define collections of upstream nodes for different blockchain networks.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `groups[].name` | string | Yes | Unique group name (used in URL path) |
+| `groups[].pluginParams` | object | No | Key-value parameters injected into plugin JS runtime as the `config` object. Allows different chains to use different contract addresses or settings |
 | `groups[].upstreams` | array | Yes | List of upstream configurations |
 
 ## Upstream Configuration
@@ -257,6 +261,9 @@ At least one of `rpcUrl` or `wsUrl` is required per upstream. By default, HTTP i
   "groups": [
     {
       "name": "ethereum",
+      "pluginParams": {
+        "codeCheckerAddress": "0x1111111111111111111111111111111111111111"
+      },
       "upstreams": [
         {
           "name": "eth-main",
@@ -268,6 +275,9 @@ At least one of `rpcUrl` or `wsUrl` is required per upstream. By default, HTTP i
     },
     {
       "name": "polygon",
+      "pluginParams": {
+        "codeCheckerAddress": "0x2222222222222222222222222222222222222222"
+      },
       "upstreams": [
         {
           "name": "polygon-main",
