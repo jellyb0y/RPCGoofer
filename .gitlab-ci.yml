@@ -1,6 +1,7 @@
 variables:
   REGISTRY: registry.gitlab.com/jellyb0y
   IMAGE: ${REGISTRY}/rpcgofer
+  GODEBUG: "http2client=0"
 
 workflow:
   rules:
