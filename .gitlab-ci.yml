@@ -32,4 +32,4 @@ build:
         --destination "${IMAGE}:${TAG}"
         --destination "${IMAGE}:latest"
         --cache=true
-        --cache-repo="${REGISTRY}/rpcgofer-cache"
+        --cache-repo="${IMAGE}/cache"
