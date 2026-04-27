@@ -19,10 +19,19 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
   "lagRecoveryTimeout": 2000,
   "upstreamMessageTimeout": 60000,
   "upstreamReconnectInterval": 5000,
+  "upstreamRequestTimeout": 15000,
   "dedupCacheSize": 10000,
   "maxSubscriptionsPerClient": 100,
   "retryEnabled": true,
   "retryMaxAttempts": 3,
+  "circuitBreakerEnabled": true,
+  "circuitBreakerFailureThreshold": 5,
+  "circuitBreakerRecoveryTimeout": 30000,
+  "circuitBreakerHalfOpenRequests": 2,
+  "circuitBreakerWindowSize": 60000,
+  "circuitBreakerMinRequests": 10,
+  "circuitBreakerFailureRateThreshold": 0.5,
+  "circuitBreakerMaxEvents": 10000,
   "cache": {
     "enabled": true,
     "ttl": 300,
@@ -92,6 +101,25 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
 | `retryEnabled` | bool | `true` | Enable automatic retries on failure |
 | `retryMaxAttempts` | int | `3` | Maximum retry attempts |
 
+## Circuit Breaker Settings
+
+The circuit breaker temporarily excludes an upstream from selection when transport-level failures (network errors, HTTP 5xx, timeouts) accumulate. JSON-RPC errors returned in the response body (HTTP 200 + `error` field) are NOT counted as failures — those are logical errors and the upstream itself is healthy.
+
+It opens when **either** trigger fires within the sliding window:
+- failures ≥ `circuitBreakerFailureThreshold` (absolute trigger);
+- total events ≥ `circuitBreakerMinRequests` AND failures/total ≥ `circuitBreakerFailureRateThreshold` (rate trigger).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `circuitBreakerEnabled` | bool | `true` | Enable circuit breaker. When disabled, all requests are allowed unconditionally. |
+| `circuitBreakerFailureThreshold` | int | `5` | Absolute number of failures within the window that opens the circuit |
+| `circuitBreakerRecoveryTimeout` | int | `30000` | After opening, how long (ms) before a probe request is allowed (transition to half-open) |
+| `circuitBreakerHalfOpenRequests` | int | `2` | Number of consecutive successes in half-open required to fully close the circuit |
+| `circuitBreakerWindowSize` | int | `60000` | Sliding window size in milliseconds. Older events are pruned and no longer counted |
+| `circuitBreakerMinRequests` | int | `10` | Minimum events in the window before the rate trigger applies |
+| `circuitBreakerFailureRateThreshold` | float | `0.5` | Failure rate (0..1) that triggers opening, when total ≥ minRequests |
+| `circuitBreakerMaxEvents` | int | `10000` | Hard cap on the events buffer per upstream. Under very high RPS, the effective window may shrink to keep memory bounded |
+
 ## Subscription Settings
 
 | Parameter | Type | Default | Description |
@@ -103,8 +131,9 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `upstreamMessageTimeout` | int | `60000` | Timeout in milliseconds for receiving messages from upstream WebSocket. If no message is received within this period, the connection is considered broken and reconnection is attempted |
+| `upstreamMessageTimeout` | int | `60000` | Timeout in milliseconds for receiving any message on the upstream WebSocket connection (read deadline). If no message is received within this period, the connection is considered broken and reconnection is attempted |
 | `upstreamReconnectInterval` | int | `5000` | Interval in milliseconds between reconnection attempts to upstream WebSocket |
+| `upstreamRequestTimeout` | int | `15000` | Per-RPC-call timeout in milliseconds for individual WebSocket requests (`SendRequest`). Without it, a hanging request would only fail when the outer client context expires (often 60-130s), preventing the circuit breaker from reacting in time. HTTP requests use `requestTimeout` (httpClient timeout) instead |
 
 These settings control automatic reconnection behavior for upstream WebSocket connections used by subscriptions. When an upstream WebSocket connection drops or times out, RPCGofer will automatically attempt to reconnect.
 
@@ -166,6 +195,7 @@ Groups define collections of upstream nodes for different blockchain networks.
 | `upstreams[].role` | string | `"main"` | Role: `"main"` or `"fallback"` |
 | `upstreams[].preferWs` | bool | `false` | When both `rpcUrl` and `wsUrl` are set, prefer WebSocket for RPC calls. Batch requests always use HTTP when available |
 | `upstreams[].blockedMethods` | array | `[]` | Methods this upstream does not support. These upstreams will not be selected for corresponding requests |
+| `upstreams[].historicalBlockRange` | uint64 | `0` | Retention window in blocks. `0` = unlimited (archive node). When `>0` the upstream is considered able to serve only blocks in `[currentBlock - historicalBlockRange, currentBlock]` and is excluded from selection for requests on older blocks (e.g. a Geth full-node with `--gcmode=full` keeps roughly 64-128 blocks of state — set `historicalBlockRange: 128` to prevent trace requests on older blocks from being routed to it). See [Block-Aware Routing](./block-aware-routing.md) |
 
 At least one of `rpcUrl` or `wsUrl` is required per upstream. By default, HTTP is preferred over WebSocket when both are configured.
 
@@ -313,6 +343,8 @@ At least one of `rpcUrl` or `wsUrl` is required per upstream. By default, HTTP i
 7. Role must be `"main"` or `"fallback"`
 8. Ports must be between 1 and 65535
 9. Cache TTL and size must be positive when cache is enabled
+10. `circuitBreakerFailureRateThreshold` must be in `[0, 1]`
+11. Other numeric circuit breaker / timeout fields must be non-negative
 
 ## Environment Variables
 

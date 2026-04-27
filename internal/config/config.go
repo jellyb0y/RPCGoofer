@@ -76,6 +76,21 @@ func applyDefaults(cfg *Config) {
 	if cfg.CircuitBreakerHalfOpenRequests == 0 {
 		cfg.CircuitBreakerHalfOpenRequests = DefaultCircuitBreakerHalfOpenRequests
 	}
+	if cfg.CircuitBreakerWindowSize == 0 {
+		cfg.CircuitBreakerWindowSize = DefaultCircuitBreakerWindowSize
+	}
+	if cfg.CircuitBreakerMinRequests == 0 {
+		cfg.CircuitBreakerMinRequests = DefaultCircuitBreakerMinRequests
+	}
+	if cfg.CircuitBreakerFailureRateThreshold == 0 {
+		cfg.CircuitBreakerFailureRateThreshold = DefaultCircuitBreakerFailureRateThreshold
+	}
+	if cfg.CircuitBreakerMaxEvents == 0 {
+		cfg.CircuitBreakerMaxEvents = DefaultCircuitBreakerMaxEvents
+	}
+	if cfg.UpstreamRequestTimeout == 0 {
+		cfg.UpstreamRequestTimeout = DefaultUpstreamRequestTimeout
+	}
 	if cfg.DedupCacheSize == 0 {
 		cfg.DedupCacheSize = DefaultDedupCacheSize
 	}
@@ -212,6 +227,26 @@ func validate(cfg *Config) error {
 
 	if cfg.RetryMaxAttempts < 0 {
 		return fmt.Errorf("retryMaxAttempts must be non-negative")
+	}
+
+	if cfg.CircuitBreakerWindowSize < 0 {
+		return fmt.Errorf("circuitBreakerWindowSize must be non-negative")
+	}
+
+	if cfg.CircuitBreakerMinRequests < 0 {
+		return fmt.Errorf("circuitBreakerMinRequests must be non-negative")
+	}
+
+	if cfg.CircuitBreakerFailureRateThreshold < 0 || cfg.CircuitBreakerFailureRateThreshold > 1 {
+		return fmt.Errorf("circuitBreakerFailureRateThreshold must be in [0, 1]")
+	}
+
+	if cfg.CircuitBreakerMaxEvents < 0 {
+		return fmt.Errorf("circuitBreakerMaxEvents must be non-negative")
+	}
+
+	if cfg.UpstreamRequestTimeout < 0 {
+		return fmt.Errorf("upstreamRequestTimeout must be non-negative")
 	}
 
 	// Validate cache config if provided

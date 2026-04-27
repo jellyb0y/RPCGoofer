@@ -12,6 +12,8 @@ High-performance JSON-RPC proxy for Ethereum-compatible blockchain nodes with bu
 - **WebSocket Subscriptions**: Full support for `eth_subscribe` with event deduplication
 - **Shared Subscriptions**: Connection multiplexing - only M upstream connections regardless of client count
 - **Health Monitoring**: Real-time block-based health checks with configurable lag threshold
+- **Circuit Breaker**: Sliding-window failure tracking that auto-removes unstable upstreams from selection on transport-level failures (network, timeouts, 5xx) without reacting to logical JSON-RPC errors
+- **Block Retention Awareness**: Per-upstream `historicalBlockRange` declaration — non-archive nodes are skipped for requests on blocks they've already pruned
 - **Batch Requests**: Native support for JSON-RPC batch processing
 - **Retry Logic**: Configurable automatic retries with intelligent error classification
 - **Multi-Chain Support**: Configure multiple blockchain networks in a single instance

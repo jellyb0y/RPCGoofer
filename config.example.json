@@ -8,6 +8,15 @@
   "statsLogInterval": 60000,
   "retryEnabled": true,
   "retryMaxAttempts": 3,
+  "circuitBreakerEnabled": true,
+  "circuitBreakerFailureThreshold": 5,
+  "circuitBreakerRecoveryTimeout": 30000,
+  "circuitBreakerHalfOpenRequests": 2,
+  "circuitBreakerWindowSize": 60000,
+  "circuitBreakerMinRequests": 10,
+  "circuitBreakerFailureRateThreshold": 0.5,
+  "circuitBreakerMaxEvents": 10000,
+  "upstreamRequestTimeout": 15000,
   "cache": {
     "enabled": true,
     "ttl": 300,
@@ -50,6 +59,13 @@
           "wsUrl": "wss://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY",
           "weight": 10,
           "role": "main"
+        },
+        {
+          "name": "own-fullnode",
+          "rpcUrl": "https://full.example.com/eth",
+          "weight": 10,
+          "role": "main",
+          "historicalBlockRange": 128
         },
         {
           "name": "public-fallback",

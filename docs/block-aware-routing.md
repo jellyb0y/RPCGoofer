@@ -16,9 +16,16 @@ Before selecting an upstream for a request, RPCGofer:
 
 1. Determines whether the method is block-dependent and what block (or block range) is requested.
 2. If a concrete block number is requested, builds a set of upstreams that have not yet reached that block (using each upstream's current block from health monitoring).
-3. Excludes those upstreams from the round-robin selection for this request.
+3. Additionally, excludes upstreams whose declared `historicalBlockRange` does not cover the requested block (the upstream has already pruned state for older blocks).
+4. The remaining upstreams are passed to the round-robin selector.
 
-Only upstreams with `currentBlock >= requestedBlock` are considered. The same logic applies to batch requests: the maximum requested block across all calls in the batch is used, and only upstreams that have reached that block are eligible.
+An upstream is eligible only when **both**:
+- `upstream.currentBlock >= requestedBlock` (caught up to the chain), AND
+- `historicalBlockRange == 0` (archive) OR `requestedBlock + historicalBlockRange >= currentBlock` (request is within the retention window).
+
+The same logic applies to batch requests, with two distinct bounds:
+- the **maximum** requested block in the batch is checked against `currentBlock` (block-lag);
+- the **minimum** requested block in the batch is checked against the `historicalBlockRange` window — because the upstream must serve every block in the batch; failing the oldest one fails the whole batch.
 
 ## Block-Param Module (blockparam)
 
@@ -79,14 +86,19 @@ When the client uses a tag, the requested block is not a fixed number; the node 
 
 1. **Single request**  
    When handling a single JSON-RPC request, the proxy calls `blockparam.GetRequestedBlockNumber(req.Method, req.Params)`.  
-   - If it gets a concrete block number `N > 0`, it builds an initial exclude set: for each upstream in `pool.GetForRequest()`, if `upstream.GetCurrentBlock() < N`, the upstream's name is added to the set.  
+   - If it gets a concrete block number `N > 0`, it builds an initial exclude set via `applyHistoricalAndLagExclude(pool, N, N, ...)`. For each upstream in `pool.GetForRequest()`:
+     - if `upstream.GetCurrentBlock() < N` — exclude (lagging behind head);
+     - if `r := upstream.GetHistoricalRange(); r > 0 && cur > r && N + r < cur` — exclude (state for block `N` was pruned).
    - This set is passed to the executor as `initialExclude`. The executor copies it into its internal "tried" map, so the balancer's `Next(exclude)` will never select those upstreams for this request.
 
 2. **Batch request**  
-   For a batch, the proxy computes `GetRequestedBlockNumber` for every request in the batch and takes the maximum block number. If that maximum is greater than zero, it builds the initial exclude set the same way: exclude any upstream whose current block is below that maximum. The whole batch is then sent to an upstream chosen from the remaining set (one upstream handles the entire batch).
+   For a batch, the proxy computes `GetRequestedBlockNumber` for every request and tracks both `maxBlock` and `minBlock`. The exclusion uses both bounds:
+   - if `upstream.GetCurrentBlock() < maxBlock` — exclude (lagging behind newest block requested);
+   - if `r := upstream.GetHistoricalRange(); r > 0 && cur > r && minBlock + r < cur` — exclude (oldest block in batch is outside the upstream's retention window).
+   The whole batch is then sent to an upstream chosen from the remaining set (one upstream handles the entire batch).
 
 3. **No block or dynamic tag**  
-   If `GetRequestedBlockNumber` returns `(0, false)` (no block param, or dynamic tag, or parse error), `initialExclude` is not built and the request is balanced as before (only health and retry-tried upstreams are excluded).
+   If `GetRequestedBlockNumber` returns `(0, false)` (no block param, or dynamic tag, or parse error), no block-based exclusion is built and the request is balanced as before (only health and retry-tried upstreams are excluded).
 
 ## Interaction with Health and Retry
 
@@ -96,11 +108,13 @@ When the client uses a tag, the requested block is not a fixed number; the node 
 
 ## Edge Cases
 
-- **All upstreams excluded**: If every upstream has `currentBlock < requestedBlock`, the initial exclude set contains all of them. The balancer will have no candidate and will return no upstream; the executor will fail with "no upstreams available" (same as when all are unhealthy or already tried).
+- **All upstreams excluded**: If every upstream has `currentBlock < requestedBlock` or fails the historical-range check, the initial exclude set contains all of them. The balancer will have no candidate and will return no upstream; the executor will fail with "no upstreams available" (same as when all are unhealthy or already tried). Configure at least one archive upstream (`historicalBlockRange: 0`, the default) per group to act as a backstop for old blocks.
 
-- **Batch with mixed methods**: Some batch entries may have a block number, others may not (e.g. `eth_blockNumber`). The maximum requested block among those that have one is used; upstreams below that block are excluded for the entire batch.
+- **Batch with mixed methods**: Some batch entries may have a block number, others may not (e.g. `eth_blockNumber`). The maximum requested block among those that have one is used for the lag check; the minimum is used for the historical-range check. Entries without a block number do not influence either bound.
 
 - **eth_call with block object**: Some clients send the block as an object `{ blockNumber: "0x123" }`. The blockparam module parses both string and object forms and returns the numeric block when present.
+
+- **uint64 underflow guard**: When `historicalBlockRange > currentBlock` (e.g. a node still syncing from genesis), the comparison `requestedBlock + range < currentBlock` is guarded by `currentBlock > range`, so a fresh node is not excluded by a misconfigured large range.
 
 ## Use in the Cache
 
@@ -110,7 +124,7 @@ The cache uses the same blockparam package to decide whether a request is cachea
 
 | Aspect | Behavior |
 |--------|----------|
-| When block is concrete (hex number) | Upstreams with `currentBlock < requestedBlock` are excluded from selection for that request (or batch). |
+| When block is concrete (hex number) | Upstreams are excluded if `currentBlock < requestedBlock` (lag) OR `historicalBlockRange > 0 && requestedBlock + range < currentBlock` (state pruned). |
 | When block is a tag (latest, pending, etc.) | No block-based exclusion; normal health-aware round-robin. |
-| Batch | Max of all requested blocks in the batch is used; one upstream must have reached that block to be selected. |
-| Module | `internal/blockparam` provides method index, dynamic-tag detection, and requested block number; used by proxy and cache. |
+| Batch | `maxBlock` is used for the lag check, `minBlock` for the historical-range check. One upstream must satisfy both for the entire batch. |
+| Module | `internal/blockparam` provides method index, dynamic-tag detection, and requested block number; used by proxy and cache. `historicalBlockRange` is per-upstream config; check is implemented in `internal/proxy/retry.go::applyHistoricalAndLagExclude`. |

@@ -329,13 +329,31 @@ func (e *Executor) executeBatchOnce(ctx context.Context, requests []*jsonrpc.Req
 	return responses, upstreamName, nil
 }
 
-// ExecuteWithPool creates a temporary executor for a pool and executes.
-// Upstreams that have not caught up to the requested block (for block-dependent methods) or have the method blocked are excluded from selection.
-func ExecuteWithPool(ctx context.Context, pool *upstream.Pool, req *jsonrpc.Request, cfg RetryConfig, logger zerolog.Logger) (*jsonrpc.Response, error) {
-	initialExclude := pool.BuildBlockedMethodsExclude(req.Method)
-	if requestedBlock, ok := blockparam.GetRequestedBlockNumber(req.Method, req.Params); ok && requestedBlock > 0 {
-		for _, u := range pool.GetForRequest() {
-			if u.GetCurrentBlock() < requestedBlock {
+// applyHistoricalAndLagExclude marks upstreams as excluded when:
+//   - their currentBlock is below requestedBlock (lagging behind head);
+//   - they declare a HistoricalBlockRange and requestedBlock is older than
+//     currentBlock - HistoricalBlockRange (state was pruned for this block already).
+//
+// The lower-bound check uses minRequiredBlock — for single requests it equals requestedBlock,
+// for batches it must be the OLDEST block in the batch (an upstream must serve all blocks).
+//
+// Returns the (possibly mutated) initialExclude map. Allocates the map lazily on first hit.
+func applyHistoricalAndLagExclude(pool *upstream.Pool, requestedBlock, minRequiredBlock uint64, initialExclude map[string]bool) map[string]bool {
+	if requestedBlock == 0 {
+		return initialExclude
+	}
+	for _, u := range pool.GetForRequest() {
+		if u.GetCurrentBlock() < requestedBlock {
+			if initialExclude == nil {
+				initialExclude = make(map[string]bool)
+			}
+			initialExclude[u.Name()] = true
+			continue
+		}
+		if r := u.GetHistoricalRange(); r > 0 && minRequiredBlock > 0 {
+			cur := u.GetCurrentBlock()
+			// Guard against uint64 underflow when r > cur (e.g. node still syncing from genesis).
+			if cur > r && minRequiredBlock+r < cur {
 				if initialExclude == nil {
 					initialExclude = make(map[string]bool)
 				}
@@ -343,13 +361,33 @@ func ExecuteWithPool(ctx context.Context, pool *upstream.Pool, req *jsonrpc.Requ
 			}
 		}
 	}
+	return initialExclude
+}
+
+// ExecuteWithPool creates a temporary executor for a pool and executes.
+// Upstreams are excluded from selection when:
+//   - the method is in their BlockedMethods list;
+//   - their currentBlock is below the requested block (they haven't caught up to head);
+//   - they declare a HistoricalBlockRange and the requested block is older than
+//     currentBlock - HistoricalBlockRange (the upstream pruned state for this block already).
+func ExecuteWithPool(ctx context.Context, pool *upstream.Pool, req *jsonrpc.Request, cfg RetryConfig, logger zerolog.Logger) (*jsonrpc.Response, error) {
+	initialExclude := pool.BuildBlockedMethodsExclude(req.Method)
+	if requestedBlock, ok := blockparam.GetRequestedBlockNumber(req.Method, req.Params); ok && requestedBlock > 0 {
+		// For a single request, minRequiredBlock == requestedBlock.
+		initialExclude = applyHistoricalAndLagExclude(pool, requestedBlock, requestedBlock, initialExclude)
+	}
 	bal := pool.GetSelector()
 	exec := NewExecutor(bal, pool, cfg, logger)
 	return exec.Execute(ctx, req, initialExclude)
 }
 
 // ExecuteBatchWithPool creates a temporary executor for a pool and executes a batch.
-// Upstreams that have not caught up to the max requested block or block any batch method are excluded from selection.
+// Upstreams are excluded from selection when:
+//   - any batch method is in their BlockedMethods list;
+//   - their currentBlock is below the maximum requested block (block-lag);
+//   - they declare a HistoricalBlockRange and the MINIMUM requested block in the batch
+//     is older than currentBlock - HistoricalBlockRange. The minimum is used because the
+//     upstream must serve every block in the batch — failing the oldest fails the whole batch.
 func ExecuteBatchWithPool(ctx context.Context, pool *upstream.Pool, requests []*jsonrpc.Request, cfg RetryConfig, logger zerolog.Logger) ([]*jsonrpc.Response, error) {
 	methods := make([]string, 0, len(requests))
 	seen := make(map[string]bool)
@@ -360,21 +398,28 @@ func ExecuteBatchWithPool(ctx context.Context, pool *upstream.Pool, requests []*
 		}
 	}
 	initialExclude := pool.BuildBlockedMethodsExcludeForBatch(methods)
-	var maxBlock uint64
+	var (
+		maxBlock    uint64
+		minBlock    uint64
+		hasMinBlock bool
+	)
 	for _, req := range requests {
-		if b, ok := blockparam.GetRequestedBlockNumber(req.Method, req.Params); ok && b > maxBlock {
-			maxBlock = b
+		if b, ok := blockparam.GetRequestedBlockNumber(req.Method, req.Params); ok && b > 0 {
+			if b > maxBlock {
+				maxBlock = b
+			}
+			if !hasMinBlock || b < minBlock {
+				minBlock = b
+				hasMinBlock = true
+			}
 		}
 	}
 	if maxBlock > 0 {
-		for _, u := range pool.GetForRequest() {
-			if u.GetCurrentBlock() < maxBlock {
-				if initialExclude == nil {
-					initialExclude = make(map[string]bool)
-				}
-				initialExclude[u.Name()] = true
-			}
+		minRequired := uint64(0)
+		if hasMinBlock {
+			minRequired = minBlock
 		}
+		initialExclude = applyHistoricalAndLagExclude(pool, maxBlock, minRequired, initialExclude)
 	}
 	bal := pool.GetSelector()
 	exec := NewExecutor(bal, pool, cfg, logger)

@@ -324,6 +324,54 @@ Pool: polygon
 │   └── Upstream: polygon-backup (HTTP polling only)
 ```
 
+## Circuit Breaker
+
+In addition to block-lag health, each upstream has a **circuit breaker (CB)** that temporarily removes it from selection after enough transport-level failures accumulate. Unlike block-lag (which is a passive observation of upstream state), the CB reacts to actual request outcomes.
+
+### What counts as a failure
+
+CB only reacts to **transport-level / infrastructure** issues — the upstream is unreachable or behaves at the connection level as broken:
+
+- TCP / dial errors, EOF, connection reset
+- HTTP non-2xx status codes
+- I/O errors reading the response body
+- JSON parse errors on the response payload
+- Per-call WebSocket request timeouts (`upstreamRequestTimeout`)
+- WebSocket disconnects while a request is pending
+
+**JSON-RPC errors in the response body** (HTTP 200 with `{ "error": { ... } }`) are NOT counted as failures. Such responses indicate the upstream is alive and answered — the error is logical (`historical state is not available`, `block not found`, `execution reverted`, `method not supported`, …) and applies to that specific request, not to the upstream's general health. The retry layer still treats them as retryable and will try another upstream, but the CB does not record them.
+
+### Sliding window
+
+The CB keeps a window of recent events (`circuitBreakerWindowSize`, default 60 s) and opens the circuit when **either** trigger fires:
+
+- **Absolute trigger**: failures in the window ≥ `circuitBreakerFailureThreshold` (default 5).
+- **Rate trigger**: total events in the window ≥ `circuitBreakerMinRequests` (default 10) AND failures/total ≥ `circuitBreakerFailureRateThreshold` (default 0.5).
+
+The rate trigger handles the case where an upstream alternates between fast successes and slow failures — for example, a load-balanced provider that returns `Internal error` on half of requests but quickly succeeds on the rest. With a pure consecutive-failure counter, every success would reset the count and the CB would never open. The window-based rate keeps a steady picture.
+
+### State machine
+
+| State | AllowRequest | Behaviour |
+|-------|--------------|-----------|
+| **closed** | allows all | record events, transition to `open` if either trigger fires |
+| **open** | blocks all | until `circuitBreakerRecoveryTimeout` (default 30 s) elapses, then transition to `half-open` on the next AllowRequest |
+| **half-open** | allows up to `circuitBreakerHalfOpenRequests` probes | success → continue, full success quota → transition to `closed` (and clear events); any failure → back to `open` |
+
+When the CB transitions, an `INFO`/`WARN` log line is emitted:
+
+```
+WARN circuit breaker state changed upstream=node-a from=closed to=open
+```
+
+### Memory bound
+
+`circuitBreakerMaxEvents` (default 10000) is a hard cap on the per-upstream events buffer. Under very high RPS the effective window may shrink (oldest events are dropped first). For typical workloads (tens of RPS per upstream) the cap is not reached.
+
+### Interaction with retry and round-robin
+
+When the CB is `open`, the upstream is removed from `pool.GetHealthyMain()` / `GetHealthyFallback()` — the round-robin balancer simply doesn't see it. After `circuitBreakerRecoveryTimeout` the first probe is allowed; if the upstream is still failing, the CB reopens immediately on the next failure (without waiting for `FailureThreshold` again). The retry layer is unaware of CB internals: it observes that some upstreams are absent from the selection pool and routes traffic accordingly.
+
 ## Best Practices
 
 ### Threshold Selection

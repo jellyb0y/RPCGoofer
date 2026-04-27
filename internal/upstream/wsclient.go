@@ -219,8 +219,17 @@ func (c *UpstreamWSClient) Close() {
 	c.logger.Info().Str("upstream", c.upstream.Name()).Msg("WebSocket disconnected")
 }
 
-// SendRequest sends an RPC request and waits for the response
+// SendRequest sends an RPC request and waits for the response.
+// If the upstream defines a positive WSRequestTimeout, ctx is wrapped via context.WithTimeout
+// so a hanging WS request fails locally (and the CB sees a transport failure) instead of
+// blocking until the outer ctx (often 60-130s from the client) expires.
 func (c *UpstreamWSClient) SendRequest(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
+	if t := c.upstream.WSRequestTimeout(); t > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, t)
+		defer cancel()
+	}
+
 	c.connMu.RLock()
 	conn := c.conn
 	c.connMu.RUnlock()

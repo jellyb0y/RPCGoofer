@@ -18,18 +18,21 @@ import (
 
 // Upstream represents a single upstream RPC endpoint
 type Upstream struct {
-	name           string
-	rpcURL         string
-	wsURL          string
-	weight         int
-	role           Role
-	preferWS       bool
-	blockedMethods map[string]bool
+	name                 string
+	rpcURL               string
+	wsURL                string
+	weight               int
+	role                 Role
+	preferWS             bool
+	blockedMethods       map[string]bool
+	historicalBlockRange uint64 // 0 = unlimited (archive); >0 = retention window in blocks
 
 	httpClient     *http.Client
 	status         *Status
 	circuitBreaker *CircuitBreaker
 	logger         zerolog.Logger
+
+	wsRequestTimeout time.Duration // per-RPC-call timeout used by SendRequest over WS
 
 	wsClient            *UpstreamWSClient
 	subscriptionRegistry subscriptionregistry.Registry
@@ -37,16 +40,18 @@ type Upstream struct {
 
 // Config for creating a new Upstream
 type Config struct {
-	Name               string
-	RPCURL             string
-	WSURL              string
-	Weight             int
-	Role               Role
-	PreferWS           bool
-	BlockedMethods     []string
-	RequestTimeout     time.Duration
-	CircuitBreakerCfg  CircuitBreakerConfig
-	Logger             zerolog.Logger
+	Name                 string
+	RPCURL               string
+	WSURL                string
+	Weight               int
+	Role                 Role
+	PreferWS             bool
+	BlockedMethods       []string
+	HistoricalBlockRange uint64
+	RequestTimeout       time.Duration // HTTP request timeout (sets httpClient.Timeout)
+	WSRequestTimeout     time.Duration // per-RPC-call timeout for WS SendRequest; 0 = no timeout
+	CircuitBreakerCfg    CircuitBreakerConfig
+	Logger               zerolog.Logger
 }
 
 // NewUpstream creates a new Upstream instance
@@ -68,44 +73,67 @@ func NewUpstream(cfg Config) *Upstream {
 		blockedMethods[m] = true
 	}
 
-	cb := NewCircuitBreaker(cfg.CircuitBreakerCfg)
+	upstreamLogger := cfg.Logger.With().Str("upstream", cfg.Name).Logger()
+
+	// Wire OnStateChange callback if not already set so CB transitions are logged.
+	cbCfg := cfg.CircuitBreakerCfg
+	if cbCfg.OnStateChange == nil {
+		cbLogger := upstreamLogger
+		cbCfg.OnStateChange = func(from, to string) {
+			cbLogger.Warn().
+				Str("from", from).
+				Str("to", to).
+				Msg("circuit breaker state changed")
+		}
+	}
+
+	cb := NewCircuitBreaker(cbCfg)
 	return &Upstream{
-		name:           cfg.Name,
-		rpcURL:         cfg.RPCURL,
-		wsURL:          cfg.WSURL,
-		weight:         cfg.Weight,
-		role:           cfg.Role,
-		preferWS:       cfg.PreferWS,
-		blockedMethods: blockedMethods,
-		httpClient:     httpClient,
-		status:         NewStatus(),
-		circuitBreaker: cb,
-		logger:         cfg.Logger.With().Str("upstream", cfg.Name).Logger(),
+		name:                 cfg.Name,
+		rpcURL:               cfg.RPCURL,
+		wsURL:                cfg.WSURL,
+		weight:               cfg.Weight,
+		role:                 cfg.Role,
+		preferWS:             cfg.PreferWS,
+		blockedMethods:       blockedMethods,
+		historicalBlockRange: cfg.HistoricalBlockRange,
+		httpClient:           httpClient,
+		status:               NewStatus(),
+		circuitBreaker:       cb,
+		wsRequestTimeout:     cfg.WSRequestTimeout,
+		logger:               upstreamLogger,
 	}
 }
 
 // NewUpstreamFromConfig creates an Upstream from config
 func NewUpstreamFromConfig(cfg config.UpstreamConfig, globalCfg *config.Config, logger zerolog.Logger) *Upstream {
 	return NewUpstream(Config{
-		Name:              cfg.Name,
-		RPCURL:            cfg.RPCURL,
-		WSURL:             cfg.WSURL,
-		Weight:            cfg.Weight,
-		Role:              RoleFromConfig(cfg.Role),
-		PreferWS:          cfg.PreferWS,
-		BlockedMethods:    cfg.BlockedMethods,
-		RequestTimeout:    globalCfg.GetRequestTimeoutDuration(),
-		CircuitBreakerCfg: buildCircuitBreakerConfig(globalCfg),
-		Logger:            logger,
+		Name:                 cfg.Name,
+		RPCURL:               cfg.RPCURL,
+		WSURL:                cfg.WSURL,
+		Weight:               cfg.Weight,
+		Role:                 RoleFromConfig(cfg.Role),
+		PreferWS:             cfg.PreferWS,
+		BlockedMethods:       cfg.BlockedMethods,
+		HistoricalBlockRange: cfg.HistoricalBlockRange,
+		RequestTimeout:       globalCfg.GetRequestTimeoutDuration(),
+		WSRequestTimeout:     globalCfg.GetUpstreamRequestTimeoutDuration(),
+		CircuitBreakerCfg:    buildCircuitBreakerConfig(globalCfg),
+		Logger:               logger,
 	})
 }
 
 func buildCircuitBreakerConfig(cfg *config.Config) CircuitBreakerConfig {
 	return CircuitBreakerConfig{
-		Enabled:             cfg.CircuitBreakerEnabled,
-		FailureThreshold:    cfg.CircuitBreakerFailureThreshold,
-		RecoveryTimeout:     cfg.GetCircuitBreakerRecoveryTimeoutDuration(),
-		HalfOpenMaxRequests: cfg.CircuitBreakerHalfOpenRequests,
+		Enabled:              cfg.CircuitBreakerEnabled,
+		FailureThreshold:     cfg.CircuitBreakerFailureThreshold,
+		RecoveryTimeout:      cfg.GetCircuitBreakerRecoveryTimeoutDuration(),
+		HalfOpenMaxRequests:  cfg.CircuitBreakerHalfOpenRequests,
+		WindowSize:           cfg.GetCircuitBreakerWindowSizeDuration(),
+		MinRequests:          cfg.CircuitBreakerMinRequests,
+		FailureRateThreshold: cfg.CircuitBreakerFailureRateThreshold,
+		MaxEvents:            cfg.CircuitBreakerMaxEvents,
+		// OnStateChange — установит NewUpstream если не задан явно.
 	}
 }
 
@@ -165,6 +193,18 @@ func (u *Upstream) SetHealthy(healthy bool) {
 // GetCurrentBlock returns the current block number
 func (u *Upstream) GetCurrentBlock() uint64 {
 	return u.status.GetCurrentBlock()
+}
+
+// GetHistoricalRange returns the retention window in blocks declared for this upstream.
+// 0 = unlimited (archive node). When >0, the upstream cannot serve requests for blocks
+// older than currentBlock - HistoricalRange (e.g. trace methods on a Geth full-node with --gcmode=full).
+func (u *Upstream) GetHistoricalRange() uint64 {
+	return u.historicalBlockRange
+}
+
+// WSRequestTimeout returns the per-RPC-call timeout for WS SendRequest. 0 = no per-call timeout.
+func (u *Upstream) WSRequestTimeout() time.Duration {
+	return u.wsRequestTimeout
 }
 
 // SetCurrentBlock sets the current block number

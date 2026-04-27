@@ -34,6 +34,15 @@ type Config struct {
 	CircuitBreakerFailureThreshold int           `json:"circuitBreakerFailureThreshold"`
 	CircuitBreakerRecoveryTimeout  int           `json:"circuitBreakerRecoveryTimeout"`
 	CircuitBreakerHalfOpenRequests int           `json:"circuitBreakerHalfOpenRequests"`
+	// Sliding-window CB params: failures/total within the window trigger open.
+	// Absolute FailureThreshold is preserved as an OR-trigger for backwards compatibility.
+	CircuitBreakerWindowSize           int     `json:"circuitBreakerWindowSize"`           // ms; default 60000
+	CircuitBreakerMinRequests          int     `json:"circuitBreakerMinRequests"`          // default 10
+	CircuitBreakerFailureRateThreshold float64 `json:"circuitBreakerFailureRateThreshold"` // 0..1; default 0.5
+	CircuitBreakerMaxEvents            int     `json:"circuitBreakerMaxEvents"`            // hard cap on events slice; default 10000
+	// Per-RPC-call timeout for upstream WS requests (HTTP uses RequestTimeout via httpClient.Timeout).
+	// Without this, hanging WS requests can sit until outer ctx (often 60-130s), and CB never sees them as failures fast enough.
+	UpstreamRequestTimeout int `json:"upstreamRequestTimeout"` // ms; default 15000
 	WSSendTimeout                int            `json:"wsSendTimeout"`             // ms - timeout for sending to client WebSocket; 0 = use default
 	Cache                     *CacheConfig    `json:"cache,omitempty"`
 	Plugins                   *PluginConfig   `json:"plugins,omitempty"`
@@ -86,6 +95,11 @@ type UpstreamConfig struct {
 	Role           Role     `json:"role"`
 	PreferWS       bool     `json:"preferWs"`       // prefer WebSocket for RPC calls when both rpcUrl and wsUrl are configured (default: false)
 	BlockedMethods []string `json:"blockedMethods"` // methods this upstream does not support
+	// HistoricalBlockRange declares how many blocks behind currentBlock this upstream keeps state for
+	// (typical for non-archive nodes: --gcmode=full keeps ~64-128 blocks).
+	// 0 = unlimited (archive). When >0 and the requested block is older than currentBlock-HistoricalBlockRange,
+	// the upstream is excluded via initialExclude before the WRR balancer.
+	HistoricalBlockRange uint64 `json:"historicalBlockRange"`
 }
 
 // Default values
@@ -112,6 +126,11 @@ const (
 	DefaultCircuitBreakerFailureThreshold = 5
 	DefaultCircuitBreakerRecoveryTimeout  = 30000  // ms
 	DefaultCircuitBreakerHalfOpenRequests = 2
+	DefaultCircuitBreakerWindowSize           = 60000 // ms - sliding window
+	DefaultCircuitBreakerMinRequests          = 10
+	DefaultCircuitBreakerFailureRateThreshold = 0.5
+	DefaultCircuitBreakerMaxEvents            = 10000
+	DefaultUpstreamRequestTimeout             = 15000 // ms - per-RPC-call timeout for WS
 	DefaultUpstreamWeight            = 1
 	DefaultUpstreamRole              = RoleMain
 	DefaultPluginDirectory           = "./plugins"
@@ -154,6 +173,23 @@ func (c *Config) GetUpstreamMessageTimeoutDuration() time.Duration {
 // GetUpstreamReconnectIntervalDuration returns upstream reconnect interval as time.Duration
 func (c *Config) GetUpstreamReconnectIntervalDuration() time.Duration {
 	return time.Duration(c.UpstreamReconnectInterval) * time.Millisecond
+}
+
+// GetUpstreamRequestTimeoutDuration returns the per-RPC-call timeout for upstream WS requests as time.Duration.
+// Defaults to DefaultUpstreamRequestTimeout when not set.
+func (c *Config) GetUpstreamRequestTimeoutDuration() time.Duration {
+	if c.UpstreamRequestTimeout <= 0 {
+		return time.Duration(DefaultUpstreamRequestTimeout) * time.Millisecond
+	}
+	return time.Duration(c.UpstreamRequestTimeout) * time.Millisecond
+}
+
+// GetCircuitBreakerWindowSizeDuration returns sliding-window size as time.Duration.
+func (c *Config) GetCircuitBreakerWindowSizeDuration() time.Duration {
+	if c.CircuitBreakerWindowSize <= 0 {
+		return time.Duration(DefaultCircuitBreakerWindowSize) * time.Millisecond
+	}
+	return time.Duration(c.CircuitBreakerWindowSize) * time.Millisecond
 }
 
 // GetUpstreamPingIntervalDuration returns upstream ping interval as time.Duration
