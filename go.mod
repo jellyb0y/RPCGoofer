@@ -10,7 +10,6 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/rs/zerolog v1.33.0
 	golang.org/x/crypto v0.47.0
-	golang.org/x/net v0.48.0
 )
 
 require (

@@ -3,6 +3,7 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
-	"golang.org/x/net/http2"
 
 	"rpcgofer/internal/config"
 	"rpcgofer/internal/jsonrpc"
@@ -19,12 +19,6 @@ import (
 )
 
 const (
-	// HTTP/2 keep-alive ping settings for upstream connections. The transport pings idle h2
-	// connections every ReadIdleTimeout and drops them if no pong arrives within PingTimeout,
-	// so a dead pooled connection is evicted BEFORE a request is dispatched onto it (otherwise
-	// the request hangs until ResponseHeaderTimeout). Most relevant for low-traffic upstreams.
-	httpUpstreamH2ReadIdleTimeout = 15 * time.Second
-	httpUpstreamH2PingTimeout     = 10 * time.Second
 	// Fallbacks when Config leaves the transport timeouts unset (e.g. direct NewUpstream in tests).
 	defaultIdleConnTimeout       = 30 * time.Second
 	defaultResponseHeaderTimeout = 10 * time.Second
@@ -82,26 +76,26 @@ func NewUpstream(cfg Config) *Upstream {
 	}
 
 	transport := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 100,
-		// Recycle idle keep-alive connections before the upstream/LB closes them server-side,
-		// so we never dispatch onto a connection the server already dropped (which would hang
-		// until ResponseHeaderTimeout). Low-traffic upstreams (e.g. ETH) are most affected.
-		IdleConnTimeout: idleConnTimeout,
-		// Bound the wait for upstream response headers — turns a dead-connection hang from a
+		// One request per connection. PROVEN on prod: 99% of "timeout awaiting response headers"
+		// were on REUSED connections (idle=0, wasIdle=false — all multiplexed onto a SINGLE h2
+		// connection that had wedged), while freshly dialed connections succeeded. Go's HTTP/2
+		// transport pins all requests to one connection per host and reuses it even with
+		// DisableKeepAlives set, so we ALSO force HTTP/1.1 (empty TLSNextProto disables the h2
+		// upgrade): HTTP/1.1 gives one connection per in-flight request and honors DisableKeepAlives
+		// (sends Connection: close). A fresh connection always works; at this RPS the extra TLS
+		// handshake is negligible. A wedged connection can now affect at most its own single request.
+		DisableKeepAlives: true,
+		ForceAttemptHTTP2: false,
+		TLSNextProto:      map[string]func(string, *tls.Conn) http.RoundTripper{},
+		// Bound the wait for upstream response headers — turns a wedged-connection hang from a
 		// full RequestTimeout stall into a fast failure that retry/last-resort can recover from.
 		ResponseHeaderTimeout: responseHeaderTimeout,
+		// IdleConnTimeout is largely moot with DisableKeepAlives, kept as a defensive bound.
+		IdleConnTimeout: idleConnTimeout,
 		// Keep upstream→gofer compression ENABLED: trace responses (debug_traceBlockByNumber
 		// with withLog) are multi-MB; gzip cuts the wire payload ~12x and prevents egress-bandwidth
 		// saturation under concurrency. Go's transport transparently adds Accept-Encoding: gzip
 		// and decompresses, so io.ReadAll below already yields plain JSON.
-	}
-
-	// Enable HTTP/2 with active keep-alive pings so dead idle connections are detected and
-	// evicted before reuse (prevents the "first request after idle hangs" failure mode).
-	if h2, err := http2.ConfigureTransports(transport); err == nil && h2 != nil {
-		h2.ReadIdleTimeout = httpUpstreamH2ReadIdleTimeout
-		h2.PingTimeout = httpUpstreamH2PingTimeout
 	}
 
 	httpClient := &http.Client{
