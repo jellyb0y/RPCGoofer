@@ -56,6 +56,7 @@ type Status struct {
 	batchCount         atomic.Uint64
 	subscriptionCount  atomic.Int64
 	subscriptionEvents atomic.Uint64
+	bytesTransferred   atomic.Uint64
 }
 
 // NewStatus creates a new Status
@@ -147,6 +148,16 @@ func (s *Status) DecrementSubscriptionCount() {
 // GetSubscriptionCount returns the current subscription count
 func (s *Status) GetSubscriptionCount() int64 {
 	return s.subscriptionCount.Load()
+}
+
+// IncrementBytesTransferredBy increments the bytes-transferred counter (response bytes read from upstream)
+func (s *Status) IncrementBytesTransferredBy(count uint64) {
+	s.bytesTransferred.Add(count)
+}
+
+// SwapBytesTransferred returns the current bytes-transferred count and resets it to zero
+func (s *Status) SwapBytesTransferred() uint64 {
+	return s.bytesTransferred.Swap(0)
 }
 
 // IncrementSubscriptionEvents increments the subscription events counter

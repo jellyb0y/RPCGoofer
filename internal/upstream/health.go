@@ -309,10 +309,12 @@ func (hm *HealthMonitor) logRequestStats() {
 func (hm *HealthMonitor) logCurrentRequestStats() {
 	var totalRequests uint64
 	var totalSubEvents uint64
+	var totalBytes uint64
 	requestStats := make(map[string]uint64)
 	batchStats := make(map[string]uint64)
 	subEventStats := make(map[string]uint64)
 	subCountStats := make(map[string]int64)
+	bytesStats := make(map[string]uint64)
 
 	for _, u := range hm.upstreams {
 		reqCount := u.SwapRequestCount()
@@ -326,6 +328,10 @@ func (hm *HealthMonitor) logCurrentRequestStats() {
 		totalSubEvents += subEventCount
 
 		subCountStats[u.Name()] = u.GetSubscriptionCount()
+
+		byteCount := u.SwapBytesTransferred()
+		bytesStats[u.Name()] = byteCount
+		totalBytes += byteCount
 	}
 
 	// Get top methods
@@ -340,7 +346,7 @@ func (hm *HealthMonitor) logCurrentRequestStats() {
 	}
 
 	// Build formatted statistics string
-	stats := hm.formatStats(hm.statsLogInterval, totalRequests, totalSubEvents, coalescedBatches, requestStats, batchStats, subEventStats, subCountStats, topMethods)
+	stats := hm.formatStats(hm.statsLogInterval, totalRequests, totalSubEvents, totalBytes, coalescedBatches, requestStats, batchStats, subEventStats, subCountStats, bytesStats, topMethods)
 
 	hm.logger.Info().
 		Dur("interval", hm.statsLogInterval).
@@ -352,11 +358,13 @@ func (hm *HealthMonitor) formatStats(
 	interval time.Duration,
 	totalRequests uint64,
 	totalSubEvents uint64,
+	totalBytes uint64,
 	coalescedBatches uint64,
 	requestStats map[string]uint64,
 	batchStats map[string]uint64,
 	subEventStats map[string]uint64,
 	subCountStats map[string]int64,
+	bytesStats map[string]uint64,
 	topMethods []MethodCount,
 ) string {
 	var buf bytes.Buffer
@@ -366,10 +374,12 @@ func (hm *HealthMonitor) formatStats(
 		intervalSec = 1
 	}
 	totalRPS := float64(totalRequests) / intervalSec
+	const mib = 1024.0 * 1024.0
 
 	buf.WriteString("request statistics\n")
 	buf.WriteString(fmt.Sprintf("  total_requests: %d\n", totalRequests))
 	buf.WriteString(fmt.Sprintf("  total_rps: %.2f\n", totalRPS))
+	buf.WriteString(fmt.Sprintf("  total_bytes_transferred: %d (%.2f MB, %.2f MB/s)\n", totalBytes, float64(totalBytes)/mib, float64(totalBytes)/mib/intervalSec))
 	buf.WriteString(fmt.Sprintf("  total_coalesced_batches: %d\n", coalescedBatches))
 	buf.WriteString(fmt.Sprintf("  total_sub_events: %d\n", totalSubEvents))
 
@@ -382,6 +392,7 @@ func (hm *HealthMonitor) formatStats(
 		buf.WriteString(fmt.Sprintf("    %s:\n", name))
 		buf.WriteString(fmt.Sprintf("      requests: %d\n", reqCount))
 		buf.WriteString(fmt.Sprintf("      rps: %.2f\n", rps))
+		buf.WriteString(fmt.Sprintf("      bytes: %d (%.2f MB, %.2f MB/s)\n", bytesStats[name], float64(bytesStats[name])/mib, float64(bytesStats[name])/mib/intervalSec))
 		buf.WriteString(fmt.Sprintf("      batches: %d\n", batchStats[name]))
 		buf.WriteString(fmt.Sprintf("      subscriptions: %d\n", subCountStats[name]))
 		buf.WriteString(fmt.Sprintf("      sub_events: %d\n", subEventStats[name]))

@@ -62,6 +62,7 @@ type CircuitBreaker struct {
 	state           cbState
 	events          []cbEvent
 	halfOpenSuccess int
+	halfOpenFailure int
 	lastFailureAt   time.Time
 	mu              sync.Mutex
 	// now is injectable for tests; production code uses time.Now.
@@ -142,12 +143,17 @@ func (cb *CircuitBreaker) AllowRequest() bool {
 	case cbClosed:
 		allowed = true
 	case cbHalfOpen:
-		allowed = cb.halfOpenSuccess < cb.cfg.HalfOpenMaxRequests
+		// Allow probes until either enough successes close the breaker or enough
+		// failures reopen it. Gating on both counters lets a few probes fail without
+		// instantly slamming the breaker back open (avoids open↔half-open flapping).
+		allowed = cb.halfOpenSuccess < cb.cfg.HalfOpenMaxRequests &&
+			cb.halfOpenFailure < cb.cfg.HalfOpenMaxRequests
 	case cbOpen:
 		if cb.now().Sub(cb.lastFailureAt) >= cb.cfg.RecoveryTimeout {
 			fromStr = cb.state.String()
 			cb.state = cbHalfOpen
 			cb.halfOpenSuccess = 0
+			cb.halfOpenFailure = 0
 			toStr = cb.state.String()
 			changed = true
 			allowed = true
@@ -186,6 +192,7 @@ func (cb *CircuitBreaker) RecordSuccess() {
 		if cb.halfOpenSuccess >= cb.cfg.HalfOpenMaxRequests {
 			fromStr = cb.state.String()
 			cb.state = cbClosed
+			cb.halfOpenFailure = 0
 			cb.events = cb.events[:0] // reset stats for the new cycle
 			toStr = cb.state.String()
 			changed = true
@@ -229,11 +236,17 @@ func (cb *CircuitBreaker) RecordFailure() {
 			changed = true
 		}
 	case cbHalfOpen:
-		fromStr = cb.state.String()
-		cb.state = cbOpen
-		cb.halfOpenSuccess = 0
-		toStr = cb.state.String()
-		changed = true
+		// Reopen only once enough probes have failed, not on the first failure —
+		// a single slow/failed probe shouldn't blackhole an otherwise-recovering upstream.
+		cb.halfOpenFailure++
+		if cb.halfOpenFailure >= cb.cfg.HalfOpenMaxRequests {
+			fromStr = cb.state.String()
+			cb.state = cbOpen
+			cb.halfOpenSuccess = 0
+			cb.halfOpenFailure = 0
+			toStr = cb.state.String()
+			changed = true
+		}
 	}
 	cb.mu.Unlock()
 

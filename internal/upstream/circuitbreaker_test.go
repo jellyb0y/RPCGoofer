@@ -194,9 +194,16 @@ func TestCircuitBreakerHalfOpenFailReopens(t *testing.T) {
 	if !cb.AllowRequest() {
 		t.Fatalf("CB should transition to half-open and allow probe")
 	}
-	cb.RecordFailure() // failure during half-open → reopen
+	// A single probe failure must NOT reopen the breaker (tolerate up to
+	// HalfOpenMaxRequests-1 failures), to avoid open↔half-open flapping.
+	cb.RecordFailure()
+	if !cb.AllowRequest() {
+		t.Fatalf("CB must stay half-open after a single probe failure (HalfOpenMaxRequests=2)")
+	}
+	// Reaching HalfOpenMaxRequests failed probes reopens the breaker.
+	cb.RecordFailure()
 	if cb.AllowRequest() {
-		t.Fatalf("CB must reopen on failure during half-open")
+		t.Fatalf("CB must reopen after HalfOpenMaxRequests failed probes")
 	}
 }
 

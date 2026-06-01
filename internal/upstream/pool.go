@@ -216,6 +216,32 @@ func (p *Pool) GetForRequest() []*Upstream {
 	return p.GetHealthyFallback()
 }
 
+// GetForRequestIgnoringCB returns upstreams suitable for a request IGNORING the circuit breaker:
+// healthy (by block / liveness) main upstreams if any, otherwise healthy fallback upstreams.
+// Used for the last-resort path so a group never goes fully dark while an upstream is still
+// reachable but has its breaker open. Unlike GetForRequest it does NOT filter on AllowRequest().
+func (p *Pool) GetForRequestIgnoringCB() []*Upstream {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	main := make([]*Upstream, 0)
+	fallback := make([]*Upstream, 0)
+	for _, u := range p.upstreams {
+		if !u.IsHealthy() {
+			continue
+		}
+		if u.IsMain() {
+			main = append(main, u)
+		} else if u.IsFallback() {
+			fallback = append(fallback, u)
+		}
+	}
+	if len(main) > 0 {
+		return main
+	}
+	return fallback
+}
+
 // GetByName returns an upstream by name
 func (p *Pool) GetByName(name string) *Upstream {
 	p.mu.RLock()

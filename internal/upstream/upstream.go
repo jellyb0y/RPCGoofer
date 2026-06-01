@@ -60,7 +60,10 @@ func NewUpstream(cfg Config) *Upstream {
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 100,
 		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true,
+		// Keep upstream→gofer compression ENABLED: trace responses (debug_traceBlockByNumber
+		// with withLog) are multi-MB; gzip cuts the wire payload ~12x and prevents egress-bandwidth
+		// saturation under concurrency. Go's transport transparently adds Accept-Encoding: gzip
+		// and decompresses, so io.ReadAll below already yields plain JSON.
 	}
 
 	httpClient := &http.Client{
@@ -232,6 +235,16 @@ func (u *Upstream) SwapRequestCount() uint64 {
 	return u.status.SwapRequestCount()
 }
 
+// IncrementBytesTransferredBy adds to the response-bytes-read counter for this upstream
+func (u *Upstream) IncrementBytesTransferredBy(count uint64) {
+	u.status.IncrementBytesTransferredBy(count)
+}
+
+// SwapBytesTransferred returns the current bytes-transferred count and resets it to zero
+func (u *Upstream) SwapBytesTransferred() uint64 {
+	return u.status.SwapBytesTransferred()
+}
+
 // IncrementBatchCount increments the coalesced batch counter for this upstream
 func (u *Upstream) IncrementBatchCount() {
 	u.status.IncrementBatchCount()
@@ -294,23 +307,41 @@ func (u *Upstream) Execute(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.
 	if !u.AllowRequest() {
 		return nil, fmt.Errorf("circuit breaker open for upstream %s", u.name)
 	}
+	return u.dispatch(ctx, req)
+}
+
+// ExecuteIgnoringCB sends a JSON-RPC request bypassing the circuit-breaker gate.
+// Used as a last resort when every upstream in a group has its breaker open but is
+// otherwise reachable (block-healthy), so the group never goes fully dark while an
+// upstream still works. Success/failure is still recorded on the breaker for recovery.
+func (u *Upstream) ExecuteIgnoringCB(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
+	return u.dispatch(ctx, req)
+}
+
+// dispatch routes the request to WS or HTTP per configuration, WITHOUT the circuit-breaker gate.
+func (u *Upstream) dispatch(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
 	if u.preferWS && u.HasWS() {
-		return u.ExecuteWS(ctx, req)
+		return u.doWS(ctx, req)
 	}
 	if u.HasRPC() {
-		return u.ExecuteHTTP(ctx, req)
+		return u.doHTTP(ctx, req)
 	}
 	if u.HasWS() {
-		return u.ExecuteWS(ctx, req)
+		return u.doWS(ctx, req)
 	}
 	return nil, fmt.Errorf("no endpoint configured for upstream %s", u.name)
 }
 
-// ExecuteHTTP sends a JSON-RPC request via HTTP
+// ExecuteHTTP sends a JSON-RPC request via HTTP (with circuit-breaker gate).
 func (u *Upstream) ExecuteHTTP(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
 	if !u.AllowRequest() {
 		return nil, fmt.Errorf("circuit breaker open for upstream %s", u.name)
 	}
+	return u.doHTTP(ctx, req)
+}
+
+// doHTTP performs the actual HTTP JSON-RPC call without the circuit-breaker gate.
+func (u *Upstream) doHTTP(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
 	if u.rpcURL == "" {
 		return nil, fmt.Errorf("HTTP RPC URL not configured")
 	}
@@ -348,6 +379,7 @@ func (u *Upstream) ExecuteHTTP(ctx context.Context, req *jsonrpc.Request) (*json
 		u.circuitBreaker.RecordFailure()
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
+	u.IncrementBytesTransferredBy(uint64(len(body)))
 
 	rpcResp, err := jsonrpc.ParseResponse(body)
 	if err != nil {
@@ -359,11 +391,21 @@ func (u *Upstream) ExecuteHTTP(ctx context.Context, req *jsonrpc.Request) (*json
 	return rpcResp, nil
 }
 
-// ExecuteBatch sends a batch of JSON-RPC requests via HTTP
+// ExecuteBatch sends a batch of JSON-RPC requests via HTTP (with circuit-breaker gate).
 func (u *Upstream) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request) ([]*jsonrpc.Response, error) {
 	if !u.AllowRequest() {
 		return nil, fmt.Errorf("circuit breaker open for upstream %s", u.name)
 	}
+	return u.doBatch(ctx, requests)
+}
+
+// ExecuteBatchIgnoringCB sends a batch bypassing the circuit-breaker gate (last-resort, see ExecuteIgnoringCB).
+func (u *Upstream) ExecuteBatchIgnoringCB(ctx context.Context, requests []*jsonrpc.Request) ([]*jsonrpc.Response, error) {
+	return u.doBatch(ctx, requests)
+}
+
+// doBatch performs the actual batch HTTP call without the circuit-breaker gate.
+func (u *Upstream) doBatch(ctx context.Context, requests []*jsonrpc.Request) ([]*jsonrpc.Response, error) {
 	if u.rpcURL == "" {
 		return nil, fmt.Errorf("HTTP RPC URL not configured")
 	}
@@ -401,6 +443,7 @@ func (u *Upstream) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request
 		u.circuitBreaker.RecordFailure()
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
+	u.IncrementBytesTransferredBy(uint64(len(body)))
 
 	responses, _, err := jsonrpc.ParseBatchResponse(body)
 	if err != nil {
@@ -412,11 +455,16 @@ func (u *Upstream) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request
 	return responses, nil
 }
 
-// ExecuteWS sends a JSON-RPC request via WebSocket
+// ExecuteWS sends a JSON-RPC request via WebSocket (with circuit-breaker gate).
 func (u *Upstream) ExecuteWS(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
 	if !u.AllowRequest() {
 		return nil, fmt.Errorf("circuit breaker open for upstream %s", u.name)
 	}
+	return u.doWS(ctx, req)
+}
+
+// doWS performs the actual WebSocket JSON-RPC call without the circuit-breaker gate.
+func (u *Upstream) doWS(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
 	if u.wsClient == nil {
 		return nil, fmt.Errorf("WebSocket not connected")
 	}

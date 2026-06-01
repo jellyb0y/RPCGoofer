@@ -66,6 +66,7 @@ func (e *Executor) Execute(ctx context.Context, req *jsonrpc.Request, initialExc
 	var lastResp *jsonrpc.Response
 	var lastUpstream string
 	usedFallback := false
+	selectedAny := false
 
 	maxAttempts := e.config.MaxAttempts
 	if maxAttempts <= 0 {
@@ -83,6 +84,9 @@ func (e *Executor) Execute(ctx context.Context, req *jsonrpc.Request, initialExc
 		}
 
 		resp, upstreamName, err := e.executeOnce(ctx, req, tried, usedFallback)
+		if upstreamName != "" {
+			selectedAny = true
+		}
 
 		// Success - no error and no JSON-RPC error
 		if err == nil && !resp.HasError() {
@@ -126,6 +130,24 @@ func (e *Executor) Execute(ctx context.Context, req *jsonrpc.Request, initialExc
 		logEvent.Msg("request failed, retrying")
 	}
 
+	// Last-resort: no upstream was ever selectable (every candidate's circuit breaker is
+	// open or was pre-excluded). If a block-healthy upstream is still reachable, try it
+	// ignoring the breaker rather than reporting a total outage while an upstream works.
+	if !selectedAny {
+		if u := e.pickLastResort(tried); u != nil {
+			e.logger.Warn().
+				Str("method", req.Method).
+				Str("upstream", u.Name()).
+				Msg("all upstreams circuit-open, trying last-resort bypass")
+			resp, err := u.ExecuteIgnoringCB(ctx, req)
+			if err == nil {
+				return resp, nil
+			}
+			lastErr = err
+			lastUpstream = u.Name()
+		}
+	}
+
 	// All retries exhausted
 	if lastResp != nil && lastResp.HasError() {
 		return lastResp, nil
@@ -136,6 +158,25 @@ func (e *Executor) Execute(ctx context.Context, req *jsonrpc.Request, initialExc
 	}
 
 	return nil, ErrAllUpstreamsFailed
+}
+
+// pickLastResort returns the highest-weight block-healthy upstream not already excluded,
+// ignoring the circuit breaker. Used to avoid a full group outage when every upstream's
+// breaker is open but at least one is still reachable. Returns nil if none qualifies.
+func (e *Executor) pickLastResort(exclude map[string]bool) *upstream.Upstream {
+	if e.pool == nil {
+		return nil
+	}
+	var best *upstream.Upstream
+	for _, u := range e.pool.GetForRequestIgnoringCB() {
+		if exclude[u.Name()] {
+			continue
+		}
+		if best == nil || u.Weight() > best.Weight() {
+			best = u
+		}
+	}
+	return best
 }
 
 // isUsingFallback checks if all main upstreams have been tried
@@ -220,6 +261,7 @@ func (e *Executor) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request
 	var lastErr error
 	var lastUpstream string
 	usedFallback := false
+	selectedAny := false
 
 	maxAttempts := e.config.MaxAttempts
 	if maxAttempts <= 0 {
@@ -237,6 +279,9 @@ func (e *Executor) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request
 		}
 
 		responses, upstreamName, err := e.executeBatchOnce(ctx, requests, tried, usedFallback)
+		if upstreamName != "" {
+			selectedAny = true
+		}
 
 		if err == nil {
 			// Check if any response has a retryable error
@@ -276,6 +321,23 @@ func (e *Executor) ExecuteBatch(ctx context.Context, requests []*jsonrpc.Request
 			logEvent = logEvent.Str("upstream", lastUpstream)
 		}
 		logEvent.Msg("batch request failed, retrying")
+	}
+
+	// Last-resort: no upstream was ever selectable (all circuit-open / pre-excluded).
+	// Try a block-healthy upstream ignoring the breaker to avoid a full group outage.
+	if !selectedAny {
+		if u := e.pickLastResort(tried); u != nil && u.HasRPC() {
+			e.logger.Warn().
+				Int("requests", len(requests)).
+				Str("upstream", u.Name()).
+				Msg("all upstreams circuit-open, trying last-resort bypass for batch")
+			responses, err := u.ExecuteBatchIgnoringCB(ctx, requests)
+			if err == nil {
+				return responses, nil
+			}
+			lastErr = err
+			lastUpstream = u.Name()
+		}
 	}
 
 	if lastErr != nil {
