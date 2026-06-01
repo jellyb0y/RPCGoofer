@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -379,6 +380,49 @@ func (u *Upstream) ExecuteHTTP(ctx context.Context, req *jsonrpc.Request) (*json
 	return u.doHTTP(ctx, req)
 }
 
+// TODO: удалить после дебага — временный трейс переиспользования pooled-коннектов к апстриму.
+// Проверяем, коррелируют ли таймауты с REUSED-коннектами (reused=true, большой idle) vs свежими.
+type httpConnInfo struct {
+	reused     bool
+	wasIdle    bool
+	idleTime   time.Duration
+	localAddr  string
+	remoteAddr string
+}
+
+// TODO: удалить после дебага
+func (u *Upstream) traceContext(ctx context.Context, info *httpConnInfo) context.Context {
+	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(gci httptrace.GotConnInfo) {
+			info.reused = gci.Reused
+			info.wasIdle = gci.WasIdle
+			info.idleTime = gci.IdleTime
+			if gci.Conn != nil {
+				info.localAddr = gci.Conn.LocalAddr().String()
+				info.remoteAddr = gci.Conn.RemoteAddr().String()
+			}
+		},
+	})
+}
+
+// TODO: удалить после дебага — одна строка на каждый HTTP-вызов с деталями коннекта
+func (u *Upstream) logConnOutcome(method string, info *httpConnInfo, elapsed time.Duration, err error) {
+	evt := u.logger.Info()
+	if err != nil {
+		evt = u.logger.Warn()
+	}
+	evt.
+		Str("method", method).
+		Bool("reused", info.reused).
+		Bool("wasIdle", info.wasIdle).
+		Dur("idle", info.idleTime).
+		Str("local", info.localAddr).
+		Str("remote", info.remoteAddr).
+		Dur("elapsed", elapsed).
+		Err(err).
+		Msg("upstream http conn-trace")
+}
+
 // doHTTP performs the actual HTTP JSON-RPC call without the circuit-breaker gate.
 func (u *Upstream) doHTTP(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.Response, error) {
 	if u.rpcURL == "" {
@@ -390,14 +434,18 @@ func (u *Upstream) doHTTP(ctx context.Context, req *jsonrpc.Request) (*jsonrpc.R
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.rpcURL, bytes.NewReader(reqBytes))
+	var conn httpConnInfo // TODO: удалить после дебага
+	reqCtx := u.traceContext(ctx, &conn)
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, u.rpcURL, bytes.NewReader(reqBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	start := time.Now()
 	resp, err := u.httpClient.Do(httpReq)
+	u.logConnOutcome(req.Method, &conn, time.Since(start), err) // TODO: удалить после дебага
 	if err != nil {
 		u.circuitBreaker.RecordFailure()
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
@@ -454,14 +502,18 @@ func (u *Upstream) doBatch(ctx context.Context, requests []*jsonrpc.Request) ([]
 		return nil, fmt.Errorf("failed to marshal batch request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.rpcURL, bytes.NewReader(reqBytes))
+	var conn httpConnInfo // TODO: удалить после дебага
+	reqCtx := u.traceContext(ctx, &conn)
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, u.rpcURL, bytes.NewReader(reqBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
+	start := time.Now()
 	httpResp, err := u.httpClient.Do(httpReq)
+	u.logConnOutcome("batch", &conn, time.Since(start), err) // TODO: удалить после дебага
 	if err != nil {
 		u.circuitBreaker.RecordFailure()
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
