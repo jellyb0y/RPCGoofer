@@ -107,6 +107,30 @@ func TestConfig_GetCircuitBreakerWindowSizeDuration_DefaultsWhenZero(t *testing.
 	}
 }
 
+func TestConfig_GetResponseHeaderTimeoutDuration_DefaultsWhenZero(t *testing.T) {
+	c := &Config{}
+	got := c.GetResponseHeaderTimeoutDuration()
+	if int(got.Milliseconds()) != DefaultResponseHeaderTimeout {
+		t.Errorf("GetResponseHeaderTimeoutDuration default = %dms, want %dms", got.Milliseconds(), DefaultResponseHeaderTimeout)
+	}
+	c2 := &Config{ResponseHeaderTimeout: 7000}
+	if got := c2.GetResponseHeaderTimeoutDuration(); got.Milliseconds() != 7000 {
+		t.Errorf("GetResponseHeaderTimeoutDuration explicit = %dms, want 7000ms", got.Milliseconds())
+	}
+}
+
+func TestConfig_GetIdleConnTimeoutDuration_DefaultsWhenZero(t *testing.T) {
+	c := &Config{}
+	got := c.GetIdleConnTimeoutDuration()
+	if int(got.Milliseconds()) != DefaultIdleConnTimeout {
+		t.Errorf("GetIdleConnTimeoutDuration default = %dms, want %dms", got.Milliseconds(), DefaultIdleConnTimeout)
+	}
+	c2 := &Config{IdleConnTimeout: 45000}
+	if got := c2.GetIdleConnTimeoutDuration(); got.Milliseconds() != 45000 {
+		t.Errorf("GetIdleConnTimeoutDuration explicit = %dms, want 45000ms", got.Milliseconds())
+	}
+}
+
 func TestGroupConfig_MarshalWithoutPluginParams(t *testing.T) {
 	gc := GroupConfig{Name: "base", Upstreams: []UpstreamConfig{}}
 	data, err := json.Marshal(gc)

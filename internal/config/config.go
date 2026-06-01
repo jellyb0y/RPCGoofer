@@ -48,6 +48,12 @@ func applyDefaults(cfg *Config) {
 	if cfg.RequestTimeout == 0 {
 		cfg.RequestTimeout = DefaultRequestTimeout
 	}
+	if cfg.ResponseHeaderTimeout == 0 {
+		cfg.ResponseHeaderTimeout = DefaultResponseHeaderTimeout
+	}
+	if cfg.IdleConnTimeout == 0 {
+		cfg.IdleConnTimeout = DefaultIdleConnTimeout
+	}
 	if cfg.HealthCheckInterval == 0 {
 		cfg.HealthCheckInterval = DefaultHealthCheckInterval
 	}
@@ -213,6 +219,14 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("requestTimeout must be non-negative")
 	}
 
+	if cfg.ResponseHeaderTimeout < 0 {
+		return fmt.Errorf("responseHeaderTimeout must be non-negative")
+	}
+
+	if cfg.IdleConnTimeout < 0 {
+		return fmt.Errorf("idleConnTimeout must be non-negative")
+	}
+
 	if cfg.HealthCheckInterval < 0 {
 		return fmt.Errorf("healthCheckInterval must be non-negative")
 	}
@@ -287,8 +301,8 @@ func validate(cfg *Config) error {
 // configWithRetryDefault is used for proper default handling of bool fields
 type configWithRetryDefault struct {
 	Config
-	RetryEnabledPtr            *bool `json:"retryEnabled"`
-	CircuitBreakerEnabledPtr   *bool `json:"circuitBreakerEnabled"`
+	RetryEnabledPtr          *bool `json:"retryEnabled"`
+	CircuitBreakerEnabledPtr *bool `json:"circuitBreakerEnabled"`
 }
 
 // Load reads and parses the configuration file with proper bool default handling

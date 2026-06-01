@@ -12,6 +12,8 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
   "logLevel": "info",
   "maxBodySize": 0,
   "requestTimeout": 5000,
+  "responseHeaderTimeout": 10000,
+  "idleConnTimeout": 30000,
   "healthCheckInterval": 10000,
   "statusLogInterval": 5000,
   "statsLogInterval": 60000,
@@ -82,7 +84,9 @@ RPCGofer uses a JSON configuration file. All configuration options are documente
 | `wsPort` | int | `8546` | WebSocket server port |
 | `logLevel` | string | `"info"` | Log level: `debug`, `info`, `warn`, `error` |
 | `maxBodySize` | int64 | `0` | Maximum request body size in bytes (0 = unlimited) |
-| `requestTimeout` | int | `5000` | Request timeout in milliseconds |
+| `requestTimeout` | int | `5000` | Overall HTTP request timeout in milliseconds (`httpClient.Timeout`, covers headers + body) |
+| `responseHeaderTimeout` | int | `10000` | Max wait in ms for an upstream to start responding (response headers). Bounds the hang caused by a stale/dead pooled connection: instead of stalling for the full `requestTimeout`, the request fails fast and retry/last-resort can recover on a fresh connection. Set ≤ `requestTimeout` |
+| `idleConnTimeout` | int | `30000` | How long an idle keep-alive connection to an upstream is kept before closing, in ms. Keep it **below** the upstream/load-balancer server-side idle timeout (~60s for Cloudflare/HAProxy); otherwise gofer reuses a connection the server already dropped and the next request hangs until `responseHeaderTimeout`. HTTP/2 connections are additionally kept healthy via keep-alive pings (ReadIdleTimeout 15s / PingTimeout 10s) |
 
 ## Health Monitoring Settings
 

@@ -12,28 +12,37 @@ const (
 
 // Config represents the main configuration structure
 type Config struct {
-	Host                      string        `json:"host"`
-	RPCPort                   int           `json:"rpcPort"`
-	WSPort                    int           `json:"wsPort"`
-	LogLevel                  string        `json:"logLevel"`
-	MaxBodySize               int64         `json:"maxBodySize"`
-	RequestTimeout            int           `json:"requestTimeout"`
-	HealthCheckInterval       int           `json:"healthCheckInterval"`
-	StatusLogInterval         int           `json:"statusLogInterval"`
-	StatsLogInterval          int           `json:"statsLogInterval"`
-	BlockLagThreshold         uint64        `json:"blockLagThreshold"`
-	LagRecoveryTimeout        int           `json:"lagRecoveryTimeout"`
-	UpstreamMessageTimeout    int           `json:"upstreamMessageTimeout"`    // ms - timeout for receiving messages from upstream WebSocket
-	UpstreamReconnectInterval int           `json:"upstreamReconnectInterval"` // ms - interval between reconnection attempts
-	UpstreamPingInterval      int           `json:"upstreamPingInterval"`      // ms - interval for WebSocket ping to upstream; 0 = use default
-	DedupCacheSize            int           `json:"dedupCacheSize"`
-	MaxSubscriptionsPerClient int           `json:"maxSubscriptionsPerClient"`
-	RetryEnabled                 bool           `json:"retryEnabled"`
-	RetryMaxAttempts              int            `json:"retryMaxAttempts"`
-	CircuitBreakerEnabled         bool           `json:"circuitBreakerEnabled"`
-	CircuitBreakerFailureThreshold int           `json:"circuitBreakerFailureThreshold"`
-	CircuitBreakerRecoveryTimeout  int           `json:"circuitBreakerRecoveryTimeout"`
-	CircuitBreakerHalfOpenRequests int           `json:"circuitBreakerHalfOpenRequests"`
+	Host           string `json:"host"`
+	RPCPort        int    `json:"rpcPort"`
+	WSPort         int    `json:"wsPort"`
+	LogLevel       string `json:"logLevel"`
+	MaxBodySize    int64  `json:"maxBodySize"`
+	RequestTimeout int    `json:"requestTimeout"`
+	// ResponseHeaderTimeout bounds how long the HTTP client waits for an upstream to START
+	// responding (response headers). Without it, a stale/dead pooled connection makes a request
+	// hang until RequestTimeout. ms; default 10000.
+	ResponseHeaderTimeout int `json:"responseHeaderTimeout"`
+	// IdleConnTimeout is how long an idle keep-alive connection to an upstream is kept before
+	// being closed. Keep it BELOW the upstream/LB server-side idle timeout (~60s for Cloudflare),
+	// otherwise gofer reuses a connection the server already dropped and the next request hangs.
+	// ms; default 30000.
+	IdleConnTimeout                int    `json:"idleConnTimeout"`
+	HealthCheckInterval            int    `json:"healthCheckInterval"`
+	StatusLogInterval              int    `json:"statusLogInterval"`
+	StatsLogInterval               int    `json:"statsLogInterval"`
+	BlockLagThreshold              uint64 `json:"blockLagThreshold"`
+	LagRecoveryTimeout             int    `json:"lagRecoveryTimeout"`
+	UpstreamMessageTimeout         int    `json:"upstreamMessageTimeout"`    // ms - timeout for receiving messages from upstream WebSocket
+	UpstreamReconnectInterval      int    `json:"upstreamReconnectInterval"` // ms - interval between reconnection attempts
+	UpstreamPingInterval           int    `json:"upstreamPingInterval"`      // ms - interval for WebSocket ping to upstream; 0 = use default
+	DedupCacheSize                 int    `json:"dedupCacheSize"`
+	MaxSubscriptionsPerClient      int    `json:"maxSubscriptionsPerClient"`
+	RetryEnabled                   bool   `json:"retryEnabled"`
+	RetryMaxAttempts               int    `json:"retryMaxAttempts"`
+	CircuitBreakerEnabled          bool   `json:"circuitBreakerEnabled"`
+	CircuitBreakerFailureThreshold int    `json:"circuitBreakerFailureThreshold"`
+	CircuitBreakerRecoveryTimeout  int    `json:"circuitBreakerRecoveryTimeout"`
+	CircuitBreakerHalfOpenRequests int    `json:"circuitBreakerHalfOpenRequests"`
 	// Sliding-window CB params: failures/total within the window trigger open.
 	// Absolute FailureThreshold is preserved as an OR-trigger for backwards compatibility.
 	CircuitBreakerWindowSize           int     `json:"circuitBreakerWindowSize"`           // ms; default 60000
@@ -42,12 +51,12 @@ type Config struct {
 	CircuitBreakerMaxEvents            int     `json:"circuitBreakerMaxEvents"`            // hard cap on events slice; default 10000
 	// Per-RPC-call timeout for upstream WS requests (HTTP uses RequestTimeout via httpClient.Timeout).
 	// Without this, hanging WS requests can sit until outer ctx (often 60-130s), and CB never sees them as failures fast enough.
-	UpstreamRequestTimeout int `json:"upstreamRequestTimeout"` // ms; default 15000
-	WSSendTimeout                int            `json:"wsSendTimeout"`             // ms - timeout for sending to client WebSocket; 0 = use default
-	Cache                     *CacheConfig    `json:"cache,omitempty"`
-	Plugins                   *PluginConfig   `json:"plugins,omitempty"`
-	Batching                  *BatchingConfig `json:"batching,omitempty"`
-	Groups                    []GroupConfig   `json:"groups"`
+	UpstreamRequestTimeout int             `json:"upstreamRequestTimeout"` // ms; default 15000
+	WSSendTimeout          int             `json:"wsSendTimeout"`          // ms - timeout for sending to client WebSocket; 0 = use default
+	Cache                  *CacheConfig    `json:"cache,omitempty"`
+	Plugins                *PluginConfig   `json:"plugins,omitempty"`
+	Batching               *BatchingConfig `json:"batching,omitempty"`
+	Groups                 []GroupConfig   `json:"groups"`
 }
 
 // CacheConfig represents cache configuration
@@ -67,8 +76,8 @@ type PluginConfig struct {
 
 // BatchingConfig represents request batching configuration
 type BatchingConfig struct {
-	Enabled bool                          `json:"enabled"`
-	Methods map[string]BatchMethodConfig  `json:"methods"`
+	Enabled bool                         `json:"enabled"`
+	Methods map[string]BatchMethodConfig `json:"methods"`
 }
 
 // BatchMethodConfig represents batching configuration for a specific method
@@ -104,45 +113,65 @@ type UpstreamConfig struct {
 
 // Default values
 const (
-	DefaultHost                      = "localhost"
-	DefaultRPCPort                   = 8545
-	DefaultWSPort                    = 8546
-	DefaultLogLevel                  = "info"
-	DefaultMaxBodySize               = int64(0) // 0 means no limit
-	DefaultRequestTimeout            = 5000     // ms
-	DefaultHealthCheckInterval       = 10000    // ms
-	DefaultStatusLogInterval         = 5000     // ms
-	DefaultStatsLogInterval          = 60000    // ms - interval for logging request statistics
-	DefaultBlockLagThreshold         = uint64(0)
-	DefaultLagRecoveryTimeout        = 2000  // ms - time for lagging upstreams to catch up before marking unhealthy
-	DefaultUpstreamMessageTimeout    = 60000 // ms - timeout for receiving messages from upstream WebSocket (60s)
-	DefaultUpstreamReconnectInterval = 5000  // ms - interval between reconnection attempts (5s)
-	DefaultUpstreamPingInterval      = 20000 // ms - interval for WebSocket ping to upstream (20s)
-	DefaultDedupCacheSize            = 10000
-	DefaultMaxSubscriptionsPerClient = 100
-	DefaultRetryEnabled                 = true
-	DefaultRetryMaxAttempts             = 3
-	DefaultCircuitBreakerEnabled        = true
-	DefaultCircuitBreakerFailureThreshold = 5
-	DefaultCircuitBreakerRecoveryTimeout  = 30000  // ms
-	DefaultCircuitBreakerHalfOpenRequests = 2
+	DefaultHost                               = "localhost"
+	DefaultRPCPort                            = 8545
+	DefaultWSPort                             = 8546
+	DefaultLogLevel                           = "info"
+	DefaultMaxBodySize                        = int64(0) // 0 means no limit
+	DefaultRequestTimeout                     = 5000     // ms
+	DefaultResponseHeaderTimeout              = 10000    // ms - max wait for upstream response headers
+	DefaultIdleConnTimeout                    = 30000    // ms - idle keep-alive lifetime to upstreams
+	DefaultHealthCheckInterval                = 10000    // ms
+	DefaultStatusLogInterval                  = 5000     // ms
+	DefaultStatsLogInterval                   = 60000    // ms - interval for logging request statistics
+	DefaultBlockLagThreshold                  = uint64(0)
+	DefaultLagRecoveryTimeout                 = 2000  // ms - time for lagging upstreams to catch up before marking unhealthy
+	DefaultUpstreamMessageTimeout             = 60000 // ms - timeout for receiving messages from upstream WebSocket (60s)
+	DefaultUpstreamReconnectInterval          = 5000  // ms - interval between reconnection attempts (5s)
+	DefaultUpstreamPingInterval               = 20000 // ms - interval for WebSocket ping to upstream (20s)
+	DefaultDedupCacheSize                     = 10000
+	DefaultMaxSubscriptionsPerClient          = 100
+	DefaultRetryEnabled                       = true
+	DefaultRetryMaxAttempts                   = 3
+	DefaultCircuitBreakerEnabled              = true
+	DefaultCircuitBreakerFailureThreshold     = 5
+	DefaultCircuitBreakerRecoveryTimeout      = 30000 // ms
+	DefaultCircuitBreakerHalfOpenRequests     = 2
 	DefaultCircuitBreakerWindowSize           = 60000 // ms - sliding window
 	DefaultCircuitBreakerMinRequests          = 10
 	DefaultCircuitBreakerFailureRateThreshold = 0.5
 	DefaultCircuitBreakerMaxEvents            = 10000
 	DefaultUpstreamRequestTimeout             = 15000 // ms - per-RPC-call timeout for WS
-	DefaultUpstreamWeight            = 1
-	DefaultUpstreamRole              = RoleMain
-	DefaultPluginDirectory           = "./plugins"
-	DefaultPluginTimeout             = 30000 // ms - default plugin execution timeout
-	DefaultBatchMaxSize              = 100   // default maximum batch size
-	DefaultBatchMaxWait              = 500   // ms - default maximum wait time for batching
-	DefaultWSSendTimeout             = 10000 // ms - default timeout for sending to client WebSocket (10s)
+	DefaultUpstreamWeight                     = 1
+	DefaultUpstreamRole                       = RoleMain
+	DefaultPluginDirectory                    = "./plugins"
+	DefaultPluginTimeout                      = 30000 // ms - default plugin execution timeout
+	DefaultBatchMaxSize                       = 100   // default maximum batch size
+	DefaultBatchMaxWait                       = 500   // ms - default maximum wait time for batching
+	DefaultWSSendTimeout                      = 10000 // ms - default timeout for sending to client WebSocket (10s)
 )
 
 // GetRequestTimeoutDuration returns request timeout as time.Duration
 func (c *Config) GetRequestTimeoutDuration() time.Duration {
 	return time.Duration(c.RequestTimeout) * time.Millisecond
+}
+
+// GetResponseHeaderTimeoutDuration returns the HTTP response-header timeout as time.Duration.
+// Defaults to DefaultResponseHeaderTimeout when not set.
+func (c *Config) GetResponseHeaderTimeoutDuration() time.Duration {
+	if c.ResponseHeaderTimeout <= 0 {
+		return time.Duration(DefaultResponseHeaderTimeout) * time.Millisecond
+	}
+	return time.Duration(c.ResponseHeaderTimeout) * time.Millisecond
+}
+
+// GetIdleConnTimeoutDuration returns the idle keep-alive connection timeout as time.Duration.
+// Defaults to DefaultIdleConnTimeout when not set.
+func (c *Config) GetIdleConnTimeoutDuration() time.Duration {
+	if c.IdleConnTimeout <= 0 {
+		return time.Duration(DefaultIdleConnTimeout) * time.Millisecond
+	}
+	return time.Duration(c.IdleConnTimeout) * time.Millisecond
 }
 
 // GetHealthCheckIntervalDuration returns health check interval as time.Duration

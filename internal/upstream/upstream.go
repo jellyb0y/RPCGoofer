@@ -10,10 +10,23 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"golang.org/x/net/http2"
 
 	"rpcgofer/internal/config"
 	"rpcgofer/internal/jsonrpc"
 	"rpcgofer/internal/subscriptionregistry"
+)
+
+const (
+	// HTTP/2 keep-alive ping settings for upstream connections. The transport pings idle h2
+	// connections every ReadIdleTimeout and drops them if no pong arrives within PingTimeout,
+	// so a dead pooled connection is evicted BEFORE a request is dispatched onto it (otherwise
+	// the request hangs until ResponseHeaderTimeout). Most relevant for low-traffic upstreams.
+	httpUpstreamH2ReadIdleTimeout = 15 * time.Second
+	httpUpstreamH2PingTimeout     = 10 * time.Second
+	// Fallbacks when Config leaves the transport timeouts unset (e.g. direct NewUpstream in tests).
+	defaultIdleConnTimeout       = 30 * time.Second
+	defaultResponseHeaderTimeout = 10 * time.Second
 )
 
 // Upstream represents a single upstream RPC endpoint
@@ -34,36 +47,60 @@ type Upstream struct {
 
 	wsRequestTimeout time.Duration // per-RPC-call timeout used by SendRequest over WS
 
-	wsClient            *UpstreamWSClient
+	wsClient             *UpstreamWSClient
 	subscriptionRegistry subscriptionregistry.Registry
 }
 
 // Config for creating a new Upstream
 type Config struct {
-	Name                 string
-	RPCURL               string
-	WSURL                string
-	Weight               int
-	Role                 Role
-	PreferWS             bool
-	BlockedMethods       []string
-	HistoricalBlockRange uint64
-	RequestTimeout       time.Duration // HTTP request timeout (sets httpClient.Timeout)
-	WSRequestTimeout     time.Duration // per-RPC-call timeout for WS SendRequest; 0 = no timeout
-	CircuitBreakerCfg    CircuitBreakerConfig
-	Logger               zerolog.Logger
+	Name                  string
+	RPCURL                string
+	WSURL                 string
+	Weight                int
+	Role                  Role
+	PreferWS              bool
+	BlockedMethods        []string
+	HistoricalBlockRange  uint64
+	RequestTimeout        time.Duration // HTTP request timeout (sets httpClient.Timeout)
+	ResponseHeaderTimeout time.Duration // max wait for upstream response headers; 0 = use default
+	IdleConnTimeout       time.Duration // idle keep-alive lifetime to upstream; 0 = use default
+	WSRequestTimeout      time.Duration // per-RPC-call timeout for WS SendRequest; 0 = no timeout
+	CircuitBreakerCfg     CircuitBreakerConfig
+	Logger                zerolog.Logger
 }
 
 // NewUpstream creates a new Upstream instance
 func NewUpstream(cfg Config) *Upstream {
+	idleConnTimeout := cfg.IdleConnTimeout
+	if idleConnTimeout <= 0 {
+		idleConnTimeout = defaultIdleConnTimeout
+	}
+	responseHeaderTimeout := cfg.ResponseHeaderTimeout
+	if responseHeaderTimeout <= 0 {
+		responseHeaderTimeout = defaultResponseHeaderTimeout
+	}
+
 	transport := &http.Transport{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 100,
-		IdleConnTimeout:     90 * time.Second,
+		// Recycle idle keep-alive connections before the upstream/LB closes them server-side,
+		// so we never dispatch onto a connection the server already dropped (which would hang
+		// until ResponseHeaderTimeout). Low-traffic upstreams (e.g. ETH) are most affected.
+		IdleConnTimeout: idleConnTimeout,
+		// Bound the wait for upstream response headers — turns a dead-connection hang from a
+		// full RequestTimeout stall into a fast failure that retry/last-resort can recover from.
+		ResponseHeaderTimeout: responseHeaderTimeout,
 		// Keep upstream→gofer compression ENABLED: trace responses (debug_traceBlockByNumber
 		// with withLog) are multi-MB; gzip cuts the wire payload ~12x and prevents egress-bandwidth
 		// saturation under concurrency. Go's transport transparently adds Accept-Encoding: gzip
 		// and decompresses, so io.ReadAll below already yields plain JSON.
+	}
+
+	// Enable HTTP/2 with active keep-alive pings so dead idle connections are detected and
+	// evicted before reuse (prevents the "first request after idle hangs" failure mode).
+	if h2, err := http2.ConfigureTransports(transport); err == nil && h2 != nil {
+		h2.ReadIdleTimeout = httpUpstreamH2ReadIdleTimeout
+		h2.PingTimeout = httpUpstreamH2PingTimeout
 	}
 
 	httpClient := &http.Client{
@@ -111,18 +148,20 @@ func NewUpstream(cfg Config) *Upstream {
 // NewUpstreamFromConfig creates an Upstream from config
 func NewUpstreamFromConfig(cfg config.UpstreamConfig, globalCfg *config.Config, logger zerolog.Logger) *Upstream {
 	return NewUpstream(Config{
-		Name:                 cfg.Name,
-		RPCURL:               cfg.RPCURL,
-		WSURL:                cfg.WSURL,
-		Weight:               cfg.Weight,
-		Role:                 RoleFromConfig(cfg.Role),
-		PreferWS:             cfg.PreferWS,
-		BlockedMethods:       cfg.BlockedMethods,
-		HistoricalBlockRange: cfg.HistoricalBlockRange,
-		RequestTimeout:       globalCfg.GetRequestTimeoutDuration(),
-		WSRequestTimeout:     globalCfg.GetUpstreamRequestTimeoutDuration(),
-		CircuitBreakerCfg:    buildCircuitBreakerConfig(globalCfg),
-		Logger:               logger,
+		Name:                  cfg.Name,
+		RPCURL:                cfg.RPCURL,
+		WSURL:                 cfg.WSURL,
+		Weight:                cfg.Weight,
+		Role:                  RoleFromConfig(cfg.Role),
+		PreferWS:              cfg.PreferWS,
+		BlockedMethods:        cfg.BlockedMethods,
+		HistoricalBlockRange:  cfg.HistoricalBlockRange,
+		RequestTimeout:        globalCfg.GetRequestTimeoutDuration(),
+		ResponseHeaderTimeout: globalCfg.GetResponseHeaderTimeoutDuration(),
+		IdleConnTimeout:       globalCfg.GetIdleConnTimeoutDuration(),
+		WSRequestTimeout:      globalCfg.GetUpstreamRequestTimeoutDuration(),
+		CircuitBreakerCfg:     buildCircuitBreakerConfig(globalCfg),
+		Logger:                logger,
 	})
 }
 
