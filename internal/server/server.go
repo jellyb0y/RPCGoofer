@@ -21,16 +21,16 @@ import (
 
 // Server represents the main server
 type Server struct {
-	cfg              *config.Config
-	router           *proxy.Router
-	cache            cache.Cache
-	pluginManager    *plugin.PluginManager
-	batchAggregator  *batcher.Aggregator
-	subManager *subscription.Manager
-	registries map[string]*subscription.Registry // pool name -> subscription registry
-	rpcServer  *http.Server
-	wsServer         *http.Server
-	logger           zerolog.Logger
+	cfg             *config.Config
+	router          *proxy.Router
+	cache           cache.Cache
+	pluginManager   *plugin.PluginManager
+	batchAggregator *batcher.Aggregator
+	subManager      *subscription.Manager
+	registries      map[string]*subscription.Registry // pool name -> subscription registry
+	rpcServer       *http.Server
+	wsServer        *http.Server
+	logger          zerolog.Logger
 }
 
 // New creates a new Server
@@ -124,7 +124,6 @@ func (s *Server) AddGroup(groupCfg config.GroupConfig) {
 	pool := upstream.NewPool(groupCfg, s.cfg, s.logger)
 	pool.SetSelector(balancer.NewWeightedRoundRobin(pool))
 
-	// TODO: remove after debug - pass group so registry logs show under same filter as wsclient
 	subRegistry := subscription.NewRegistry(s.cfg.DedupCacheSize, s.logger.With().Str("group", groupCfg.Name).Logger())
 	s.registries[groupCfg.Name] = subRegistry
 

@@ -49,11 +49,11 @@ func NewRegistry(dedupSize int, logger zerolog.Logger) *Registry {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Registry{
 		active:    make(map[string]*subEntry),
-		upstreams:  make(map[string]subscriptionregistry.SubscriptionTarget),
-		dedupSize:  dedupSize,
-		logger:     logger.With().Str("component", "subscription-registry").Logger(),
-		ctx:        ctx,
-		cancel:     cancel,
+		upstreams: make(map[string]subscriptionregistry.SubscriptionTarget),
+		dedupSize: dedupSize,
+		logger:    logger.With().Str("component", "subscription-registry").Logger(),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 }
 
@@ -185,7 +185,7 @@ func (r *Registry) Register(upstreamName string, target subscriptionregistry.Sub
 	r.upstreams[upstreamName] = target
 	// Copy list of active subscription keys and params to subscribe (no lock during Subscribe)
 	toSub := make([]struct {
-		key    string
+		key     string
 		subType SubscriptionType
 		params  json.RawMessage
 	}, 0, len(r.active))
@@ -202,16 +202,12 @@ func (r *Registry) Register(upstreamName string, target subscriptionregistry.Sub
 
 	ctx, cancel := context.WithTimeout(r.ctx, 15*time.Second)
 	defer cancel()
-	// TODO: remove after debug
-	r.logger.Info().Str("upstream", upstreamName).Int("count", len(toSub)).Msg("Register: starting Subscribe loop (15s timeout per call)")
 	for _, item := range toSub {
 		subID, err := target.Subscribe(ctx, subscriptionregistry.SubscriptionType(item.subType), item.params)
 		if err != nil {
 			r.logger.Warn().Err(err).Str("upstream", upstreamName).Str("key", item.key).Msg("failed to subscribe upstream")
 			continue
 		}
-		// TODO: remove after debug
-		r.logger.Info().Str("upstream", upstreamName).Str("key", item.key).Str("subID", subID).Msg("Register: Subscribe succeeded for key")
 		r.mu.Lock()
 		if entry, ok := r.active[item.key]; ok {
 			entry.upstreams[upstreamName] = subID
