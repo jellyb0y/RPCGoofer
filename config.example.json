@@ -95,6 +95,22 @@
           "role": "main"
         }
       ]
+    },
+    {
+      "name": "robingood",
+      "pluginParams": {
+        "codeCheckerAddress": "0xB9a4E2ef3a2B9e9916d9c522693b87243cEAC733"
+      },
+      "upstreams": [
+        {
+          "name": "drpc",
+          "rpcUrl": "https://lb.drpc.live/robinhood/<DRPC_KEY>",
+          "wsUrl": "wss://lb.drpc.live/robinhood/<DRPC_KEY>",
+          "weight": 10,
+          "role": "main",
+          "preferWs": true
+        }
+      ]
     }
   ]
 }
